@@ -15,7 +15,13 @@ FetchContent_Declare(
     GIT_TAG v3.11.3
     GIT_SHALLOW TRUE
 )
-FetchContent_MakeAvailable(nlohmann_json)
+FetchContent_Declare(
+    ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+    GIT_TAG v5.0.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json ftxui)
 
 add_executable(securemsg
     src/main.cpp
@@ -24,6 +30,8 @@ add_executable(securemsg
     src/MessageStore.cpp
     src/ApiClient.cpp
     src/CryptoManager.cpp
+    src/Group.cpp
+    src/BlockchainManager.cpp
 )
 
 target_include_directories(securemsg PRIVATE include)
@@ -33,6 +41,9 @@ target_link_libraries(securemsg PRIVATE
     OpenSSL::Crypto
     CURL::libcurl
     nlohmann_json::nlohmann_json
+    ftxui::screen
+    ftxui::dom
+    ftxui::component
 )
 
 target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)

@@ -278,3 +278,75 @@ void ApiClient::revokeMessage(const std::string& accessToken,
              {{"revocation_token", revocationTokenB64}},
              accessToken);
 }
+
+// ── Groups ────────────────────────────────────────────────────────────────────
+
+nlohmann::json ApiClient::listGroups(const std::string& accessToken) {
+    return doGet("/api/v1/groups/", accessToken);
+}
+
+nlohmann::json ApiClient::createGroup(const std::string& accessToken,
+                                       const std::string& name)
+{
+    return doPost("/api/v1/groups/", {{"name", name}, {"initial_members", nlohmann::json::object()}}, accessToken);
+}
+
+nlohmann::json ApiClient::getGroup(const std::string& accessToken, int groupId) {
+    return doGet("/api/v1/groups/" + std::to_string(groupId), accessToken);
+}
+
+void ApiClient::addGroupMember(const std::string& accessToken, int groupId,
+                                int userId, const std::string& skdmCiphertextB64)
+{
+    doPost("/api/v1/groups/" + std::to_string(groupId) + "/members",
+           {{"user_id", userId}, {"skdm_ciphertext", skdmCiphertextB64}},
+           accessToken);
+}
+
+void ApiClient::removeGroupMember(const std::string& accessToken, int groupId, int userId) {
+    doDelete("/api/v1/groups/" + std::to_string(groupId) + "/members/" + std::to_string(userId),
+             nlohmann::json::object(), accessToken);
+}
+
+nlohmann::json ApiClient::sendGroupMessage(const std::string& accessToken, int groupId,
+                                            int epoch, const std::string& ciphertextB64)
+{
+    return doPost("/api/v1/groups/" + std::to_string(groupId) + "/messages",
+                  {{"epoch", epoch}, {"ciphertext", ciphertextB64}},
+                  accessToken);
+}
+
+nlohmann::json ApiClient::listGroupMessages(const std::string& accessToken, int groupId) {
+    return doGet("/api/v1/groups/" + std::to_string(groupId) + "/messages", accessToken);
+}
+
+void ApiClient::acknowledgeGroupReceipt(const std::string& accessToken,
+                                         int groupId, int messageId)
+{
+    doPostEmpty("/api/v1/groups/" + std::to_string(groupId) +
+                "/messages/" + std::to_string(messageId) + "/receipt", accessToken);
+}
+
+void ApiClient::revokeGroupMessage(const std::string& accessToken,
+                                    int groupId, int messageId)
+{
+    doDelete("/api/v1/groups/" + std::to_string(groupId) + "/messages/" + std::to_string(messageId),
+             nlohmann::json::object(), accessToken);
+}
+
+void ApiClient::postSkdm(const std::string& accessToken, int groupId,
+                          const nlohmann::json& skdmCiphertexts)
+{
+    doPost("/api/v1/groups/" + std::to_string(groupId) + "/skdm",
+           {{"skdm_ciphertexts", skdmCiphertexts}}, accessToken);
+}
+
+nlohmann::json ApiClient::fetchSkdm(const std::string& accessToken, int groupId) {
+    return doGet("/api/v1/groups/" + std::to_string(groupId) + "/skdm", accessToken);
+}
+
+nlohmann::json ApiClient::lookupByUsername(const std::string& accessToken,
+                                            const std::string& username)
+{
+    return doGet("/api/v1/keys/lookup/by-username?username=" + username, accessToken);
+}

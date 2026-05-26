@@ -51,6 +51,40 @@ public:
                        int messageId,
                        const std::string& revocationTokenB64);
 
+    // Groups
+    nlohmann::json listGroups(const std::string& accessToken);
+
+    nlohmann::json createGroup(const std::string& accessToken,
+                               const std::string& name);
+
+    nlohmann::json getGroup(const std::string& accessToken, int groupId);
+
+    void addGroupMember(const std::string& accessToken, int groupId,
+                        int userId, const std::string& skdmCiphertextB64);
+
+    void removeGroupMember(const std::string& accessToken, int groupId, int userId);
+
+    nlohmann::json sendGroupMessage(const std::string& accessToken, int groupId,
+                                    int epoch, const std::string& ciphertextB64);
+
+    nlohmann::json listGroupMessages(const std::string& accessToken, int groupId);
+
+    void acknowledgeGroupReceipt(const std::string& accessToken,
+                                  int groupId, int messageId);
+
+    void revokeGroupMessage(const std::string& accessToken,
+                             int groupId, int messageId);
+
+    // Sender key distribution
+    void postSkdm(const std::string& accessToken, int groupId,
+                  const nlohmann::json& skdmCiphertexts);
+
+    nlohmann::json fetchSkdm(const std::string& accessToken, int groupId);
+
+    // Key lookup by username
+    nlohmann::json lookupByUsername(const std::string& accessToken,
+                                    const std::string& username);
+
 private:
     nlohmann::json doPost(const std::string& path,
                           const nlohmann::json& body,
