@@ -32,17 +32,6 @@ std::vector<uint8_t> sha256(std::initializer_list<Span> parts) {
     return out;
 }
 
-// Convert a BIGNUM to a fixed-width big-endian byte vector (left-padded with zeros).
-std::vector<uint8_t> bnToFixedBytes(const BIGNUM* bn, std::size_t width) {
-    std::vector<uint8_t> buf(width, 0);
-    int bytes = BN_num_bytes(bn);
-    if (static_cast<std::size_t>(bytes) > width)
-        throw std::runtime_error("BN too large for requested width");
-    // Write into the right-hand side so the result is left-padded.
-    BN_bn2bin(bn, buf.data() + (width - bytes));
-    return buf;
-}
-
 // SRP-6a 4096-bit group prime (RFC 5054, Appendix A.4) — matches pysrp NG_4096.
 static const char* SRP_N_HEX =
     "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08"
@@ -66,24 +55,24 @@ static const char* SRP_N_HEX =
     "FFFFFFFFFFFFFFFF";
 
 static constexpr std::size_t SRP_N_BYTES = 512; // 4096 bits
-static constexpr uint8_t     SRP_G       = 2;
+static constexpr uint8_t     SRP_G       = 5;   // pysrp NG_4096 uses g=5
 
 // Load the RFC-5054 group into three BIGNUMs.  Caller owns n, g, k.
+// k = SHA256(N_bytes || g_bytes) — unpadded, matching pysrp's non-rfc5054 mode.
 void srpLoadGroup(BIGNUM*& n, BIGNUM*& g, BIGNUM*& k, BN_CTX* ctx) {
     BN_hex2bn(&n, SRP_N_HEX);
     g = BN_new(); BN_set_word(g, SRP_G);
 
-    // k = SHA-256( N || PAD(g, 256) )
-    // N_bytes: 256-byte big-endian representation of N.
-    std::vector<uint8_t> nBytes(SRP_N_BYTES, 0);
-    BN_bn2binpad(n, nBytes.data(), static_cast<int>(SRP_N_BYTES));
+    // N is exactly 4096 bits so BN_bn2bin gives 512 bytes with no leading zeros.
+    std::vector<uint8_t> nBytes(static_cast<std::size_t>(BN_num_bytes(n)));
+    BN_bn2bin(n, nBytes.data());
 
-    std::vector<uint8_t> gPadded(SRP_N_BYTES, 0);
-    gPadded[SRP_N_BYTES - 1] = SRP_G; // g = 2, big-endian, padded to N_length
+    // g = 5, one byte — matches pysrp's long_to_bytes(g) = b'\x05'.
+    uint8_t gByte = SRP_G;
 
     auto kBytes = sha256({
-        {nBytes.data(),  nBytes.size()},
-        {gPadded.data(), gPadded.size()}
+        {nBytes.data(), nBytes.size()},
+        {&gByte,        1}
     });
 
     k = BN_new();
@@ -133,12 +122,12 @@ std::string SrpSession::begin(const std::string& username, const std::string& pa
     BIGNUM* A = BN_new();
     BN_mod_exp(A, g, a, N, ctx);
 
-    // Persist a and A as fixed-width byte vectors for use in computeProof().
-    m_a_bytes.resize(SRP_N_BYTES);
-    BN_bn2binpad(a, m_a_bytes.data(), static_cast<int>(SRP_N_BYTES));
+    // Persist a and A as unpadded big-endian bytes — matches pysrp long_to_bytes().
+    m_a_bytes.resize(static_cast<std::size_t>(BN_num_bytes(a)));
+    BN_bn2bin(a, m_a_bytes.data());
 
-    m_A_bytes.resize(SRP_N_BYTES);
-    BN_bn2binpad(A, m_A_bytes.data(), static_cast<int>(SRP_N_BYTES));
+    m_A_bytes.resize(static_cast<std::size_t>(BN_num_bytes(A)));
+    BN_bn2bin(A, m_A_bytes.data());
 
     std::string hexA = CryptoManager::toHex(m_A_bytes);
 
@@ -151,11 +140,7 @@ std::string SrpSession::computeProof(const std::string& srpSaltHex,
                                       const std::string& serverPublicHex)
 {
     auto saltBytes = CryptoManager::fromHex(srpSaltHex);
-    auto bBytes    = CryptoManager::fromHex(serverPublicHex);
-    // Pad B to N_BYTES if needed.
-    if (bBytes.size() < SRP_N_BYTES) {
-        bBytes.insert(bBytes.begin(), SRP_N_BYTES - bBytes.size(), 0);
-    }
+    auto bBytes    = CryptoManager::fromHex(serverPublicHex); // unpadded, matches pysrp
 
     BN_CTX* ctx = BN_CTX_new();
     BIGNUM* N = nullptr; BIGNUM* g = nullptr; BIGNUM* k = nullptr;
@@ -164,7 +149,7 @@ std::string SrpSession::computeProof(const std::string& srpSaltHex,
     BIGNUM* B = BN_new();
     BN_bin2bn(bBytes.data(), static_cast<int>(bBytes.size()), B);
 
-    // u = SHA-256( PAD(A, 256) || PAD(B, 256) )
+    // u = SHA-256( A_bytes || B_bytes ) — unpadded, matches pysrp non-rfc5054 mode
     auto uHash = sha256({
         {m_A_bytes.data(), m_A_bytes.size()},
         {bBytes.data(),    bBytes.size()}
@@ -189,24 +174,24 @@ std::string SrpSession::computeProof(const std::string& srpSaltHex,
 
     BIGNUM* S   = BN_new(); BN_mod_exp(S, diff, exp, N, ctx);
 
-    // K = SHA-256( PAD(S, 256) )
-    auto sBytes = bnToFixedBytes(S, SRP_N_BYTES);
+    // K = SHA-256( S_bytes ) — unpadded, matches pysrp long_to_bytes(S)
+    std::vector<uint8_t> sBytes(static_cast<std::size_t>(BN_num_bytes(S)));
+    BN_bn2bin(S, sBytes.data());
     m_K = sha256({{sBytes.data(), sBytes.size()}});
 
-    // Compute h(N) XOR h(g)
-    std::vector<uint8_t> nBytes(SRP_N_BYTES, 0);
-    BN_bn2binpad(N, nBytes.data(), static_cast<int>(SRP_N_BYTES));
-    std::vector<uint8_t> gPadded(SRP_N_BYTES, 0);
-    gPadded[SRP_N_BYTES - 1] = SRP_G;
+    // Compute h(N) XOR h(g) — unpadded, matches pysrp long_to_bytes(g) = b'\x05'
+    std::vector<uint8_t> nBytes(static_cast<std::size_t>(BN_num_bytes(N)));
+    BN_bn2bin(N, nBytes.data());
+    uint8_t gByte = SRP_G;
 
     auto hN = sha256({{nBytes.data(), nBytes.size()}});
-    auto hg = sha256({{gPadded.data(), gPadded.size()}});
+    auto hg = sha256({{&gByte, 1}});
     std::vector<uint8_t> hNxorHg(SHA256_DIGEST_LENGTH);
     for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) hNxorHg[i] = hN[i] ^ hg[i];
 
     auto hI = sha256({{reinterpret_cast<const uint8_t*>(m_username.data()), m_username.size()}});
 
-    // M1 = SHA-256( hNxorHg || h(I) || salt || PAD(A) || PAD(B) || K )
+    // M1 = SHA-256( hNxorHg || h(I) || salt || A || B || K ) — unpadded
     m_M1 = sha256({
         {hNxorHg.data(),   hNxorHg.size()},
         {hI.data(),        hI.size()},

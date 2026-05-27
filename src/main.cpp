@@ -89,6 +89,7 @@ int main() {
 
     // Session
     std::string sessionUser, accessToken, refreshToken;
+    int myUserId = 0;
     std::vector<uint8_t> myPriv, myPub;
 
     // Messages
@@ -306,6 +307,11 @@ int main() {
         try {
             myPriv = loadOrCreateKey(passStr, myPub);
             passStr.clear(); passStatus.clear();
+            // Best-effort: look up our user ID if we already have a key bundle published.
+            try {
+                auto me = api.lookupByUsername(accessToken, sessionUser);
+                myUserId = me["user_id"].get<int>();
+            } catch (...) {}
             scr = SCR_MAIN;
             setStatus("Welcome, " + sessionUser + "!");
         } catch (const std::exception& e) { passStatus = "Error: " + std::string(e.what()); }
@@ -371,11 +377,15 @@ int main() {
                 line << "[" << id << "] uid:" << sid << "  " << fmtTs(ts) << "  " << plain;
                 msgLines.push_back(line.str());
                 // Buffer for blockchain
-                std::string cid = convId(sid, 0);
+                std::string cid = convId(sid, myUserId);
                 MessageEnvelope env;
-                env.conversationId   = cid; env.messageId = std::to_string(id);
-                env.senderId         = std::to_string(sid); env.recipientId = "0";
-                env.ciphertext       = ct; env.ratchetHeaderEnc = hdr; env.sentAt = ts;
+                env.conversationId   = cid;
+                env.messageId        = std::to_string(id);
+                env.senderId         = std::to_string(sid);
+                env.recipientId      = std::to_string(myUserId);
+                env.ciphertext       = ct;
+                env.ratchetHeaderEnc = hdr;
+                env.sentAt           = ts;
                 segBuf[cid].push_back(env);
             }
             setStatus("Fetched " + std::to_string(msgs.size()) + " message(s).");
@@ -630,13 +640,15 @@ int main() {
                 {"signed_prekey_sig", b64}, {"one_time_prekeys",  nlohmann::json::array()},
                 {"pq_prekey_pub",     b64}, {"pq_prekey_sig",     b64}
             });
-            setStatus("Public key published.");
+            auto me = api.lookupByUsername(accessToken, sessionUser);
+            myUserId = me["user_id"].get<int>();
+            setStatus("Public key published. User ID: " + std::to_string(myUserId));
         } catch (const std::exception& e) { setStatus("Error: " + std::string(e.what()), true); }
     });
 
     auto aBtn_logout = Button(" Logout ", [&]{
         try { api.logout(refreshToken); } catch (...) {}
-        accessToken.clear(); refreshToken.clear(); myPriv.clear(); myPub.clear();
+        accessToken.clear(); refreshToken.clear(); myPriv.clear(); myPub.clear(); myUserId = 0;
         msgLines.clear(); grpListLines.clear(); grpMsgLines.clear();
         chainLines.clear(); segBuf.clear(); store.clear();
         scr = SCR_WELCOME;
@@ -648,6 +660,7 @@ int main() {
         return vbox({
             text(""),
             hbox({text("  Username  : "), text(sessionUser) | bold}),
+            hbox({text("  User ID   : "), text(myUserId ? std::to_string(myUserId) : "— (publish key to resolve)") | dim}),
             hbox({text("  Key ID    : "), text(fp) | dim}),
             hbox({text("  Cached    : "), text(std::to_string(store.size()) + " messages") | dim}),
             text(""),
