@@ -3,3 +3,5 @@ build/
 *.a
 identity.key
 docs/
+.idea
+cmake-build-debug
