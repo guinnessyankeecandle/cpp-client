@@ -38,7 +38,6 @@ add_executable(securemsg
     src/CryptoManager.cpp
     src/Group.cpp
     src/BlockchainManager.cpp
-    src/qrcodegen.cpp
 )
 
 target_include_directories(securemsg PRIVATE include)
