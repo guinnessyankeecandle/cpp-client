@@ -112,36 +112,18 @@ std::vector<uint8_t> BlockchainManager::keccak256(const std::string& utf8) {
 //   Sort keys alphabetically, no whitespace, IDs as strings, sent_at as number.
 
 std::string BlockchainManager::canonicalise(const MessageEnvelope& env) {
-    // Build as nlohmann::json then dump with sorted keys.
-    nlohmann::json j;
-    j["ciphertext"]         = env.ciphertext;
-    j["conversation_id"]    = env.conversationId;
-    j["message_id"]         = env.messageId;          // string
-    j["message_type"]       = env.messageType;
-    j["ratchet_header_enc"] = env.ratchetHeaderEnc;
-    j["recipient_id"]       = env.recipientId;        // string
-    j["schema_version"]     = env.schemaVersion;
-    j["sender_id"]          = env.senderId;           // string
-    j["sent_at"]            = env.sentAt;             // number
-
-    // nlohmann::json::dump() sorts keys when using json::object() and iterating
-    // alphabetically — ensure by building a std::map-based JSON.
-    // Actually nlohmann preserves insertion order for object by default.
-    // Use the ordered_json variant or manually sort.
-    // Simplest: build ordered map and dump.
+    // Field set and order must exactly match merkleUtils.js DIRECT_ENVELOPE_FIELDS.
+    // sent_at is intentionally excluded — Waleed's JS does not include it.
     nlohmann::ordered_json oj;
-    // Insert alphabetically (by hand since fields are known):
     oj["ciphertext"]         = env.ciphertext;
     oj["conversation_id"]    = env.conversationId;
-    oj["message_id"]         = env.messageId;
+    oj["message_id"]         = env.messageId;         // string
     oj["message_type"]       = env.messageType;
     oj["ratchet_header_enc"] = env.ratchetHeaderEnc;
-    oj["recipient_id"]       = env.recipientId;
+    oj["recipient_id"]       = env.recipientId;       // string
     oj["schema_version"]     = env.schemaVersion;
-    oj["sender_id"]          = env.senderId;
-    oj["sent_at"]            = env.sentAt;
-
-    return oj.dump(); // compact, no extra whitespace
+    oj["sender_id"]          = env.senderId;          // string
+    return oj.dump();
 }
 
 std::vector<uint8_t> BlockchainManager::leafHash(const MessageEnvelope& env) {

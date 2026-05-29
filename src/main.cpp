@@ -31,6 +31,12 @@ static constexpr int     SEGMENT_SIZE      = 5;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+static int parseId(const std::string& s) {
+    std::size_t i = s.find_first_not_of(" \t\r\n");
+    if (i == std::string::npos) throw std::invalid_argument("empty");
+    return std::stoi(s.substr(i));
+}
+
 static std::string fmtTs(int64_t epoch) {
     std::time_t t = static_cast<std::time_t>(epoch);
     char buf[20];
@@ -397,7 +403,7 @@ int main() {
             setStatus("Enter recipient ID and message.", true); return;
         }
         try {
-            int rid      = std::stoi(sendTo);
+            int rid = parseId(sendTo);
             auto bundle  = api.getKeyBundle(accessToken, rid);
             auto rPub    = CryptoManager::base64Decode(bundle["identity_pub"].get<std::string>());
             auto [mk,ep] = CryptoManager::deriveMessageKey(myPriv, myPub, rPub);
@@ -416,8 +422,8 @@ int main() {
 
     auto mBtn_ack = Button(" Ack ", [&]{
         try {
-            api.acknowledgeReceipt(accessToken, std::stoi(ackIdStr));
-            store.removeById(std::stoi(ackIdStr));
+            api.acknowledgeReceipt(accessToken, parseId(ackIdStr));
+            store.removeById(parseId(ackIdStr));
             setStatus("Acknowledged " + ackIdStr + ".");
             ackIdStr.clear();
         } catch (const std::exception& e) { setStatus("Ack error: " + std::string(e.what()), true); }
@@ -425,7 +431,7 @@ int main() {
 
     auto mBtn_revoke = Button(" Revoke ", [&]{
         try {
-            api.revokeMessage(accessToken, std::stoi(revIdStr), "");
+            api.revokeMessage(accessToken, parseId(revIdStr), "");
             setStatus("Revoked " + revIdStr + ".");
             revIdStr.clear();
         } catch (const std::exception& e) { setStatus("Revoke error: " + std::string(e.what()), true); }
@@ -493,15 +499,21 @@ int main() {
 
     auto gBtn_addMem = Button(" Add Member ", [&]{
         try {
-            int gid = std::stoi(addGrpId), uid = std::stoi(addMemId);
+            if (addGrpId.empty() || addMemId.empty()) {
+                grpStatus = "Enter group ID and user ID."; return;
+            }
+            int gid = parseId(addGrpId), uid = parseId(addMemId);
             auto bundle  = api.getKeyBundle(accessToken, uid);
             auto mPub    = CryptoManager::base64Decode(bundle["identity_pub"].get<std::string>());
             auto& sk     = grpKey(gid);
             auto [mk,ep] = CryptoManager::deriveMessageKey(myPriv, myPub, mPub);
             auto pkt     = CryptoManager::aeadEncrypt(std::string(sk.begin(), sk.end()), mk);
             auto packed  = CryptoManager::packAead(pkt);
+            // Payload: senderPub(32) + ephemeralPub(32) + packed_aead
+            // Recipient needs senderPub to call recoverMessageKey.
             std::vector<uint8_t> payload;
-            payload.insert(payload.end(), ep.begin(), ep.end());
+            payload.insert(payload.end(), myPub.begin(),  myPub.end());
+            payload.insert(payload.end(), ep.begin(),     ep.end());
             payload.insert(payload.end(), packed.begin(), packed.end());
             api.addGroupMember(accessToken, gid, uid, CryptoManager::base64Encode(payload));
             grpStatus = "Added user " + addMemId + " to group " + addGrpId;
@@ -511,7 +523,8 @@ int main() {
 
     auto gBtn_send = Button(" Send ", [&]{
         try {
-            int gid   = std::stoi(sndGrpId);
+            if (sndGrpId.empty()) { grpStatus = "Enter group ID."; return; }
+            int gid   = parseId(sndGrpId);
             auto& sk  = grpKey(gid);
             auto pkt  = CryptoManager::aeadEncrypt(sndGrpText, sk);
             auto gi   = api.getGroup(accessToken, gid);
@@ -524,7 +537,25 @@ int main() {
 
     auto gBtn_fetch = Button(" Fetch ", [&]{
         try {
-            int gid   = std::stoi(fetchGrpId);
+            if (fetchGrpId.empty()) { grpStatus = "Enter group ID."; return; }
+            int gid = parseId(fetchGrpId);
+
+            // Drain any pending SKDMs to update the group key.
+            auto skdmResp = api.fetchSkdm(accessToken, gid);
+            auto skdmList = skdmResp.value("skdm_ciphertexts", nlohmann::json::array());
+            for (const auto& entry : skdmList) {
+                auto raw = CryptoManager::base64Decode(entry["ciphertext"].get<std::string>());
+                // Payload layout: senderPub(32) + ephemPub(32) + packed_aead
+                if (raw.size() > 64) {
+                    std::vector<uint8_t> senderPub(raw.begin(),      raw.begin() + 32);
+                    std::vector<uint8_t> ephPub   (raw.begin() + 32, raw.begin() + 64);
+                    std::vector<uint8_t> packed   (raw.begin() + 64, raw.end());
+                    auto mk = CryptoManager::recoverMessageKey(myPriv, myPub, senderPub, ephPub);
+                    auto plainGK = CryptoManager::aeadDecrypt(CryptoManager::unpackAead(packed), mk);
+                    groupKeys[gid] = std::vector<uint8_t>(plainGK.begin(), plainGK.end());
+                }
+            }
+
             auto msgs = api.listGroupMessages(accessToken, gid);
             auto& sk  = grpKey(gid);
             grpMsgLines.clear();
@@ -591,7 +622,7 @@ int main() {
         chainStatus = std::to_string(segBuf.size()) + " conversation(s) buffered.";
     });
 
-    auto cBtn_record = Button(" Record Segment ", [&]{
+    auto cBtn_record = Button(" Export Segment ", [&]{
         if (chainConvInput.empty()) { chainStatus = "Enter a conversation ID."; return; }
         auto it = segBuf.find(chainConvInput);
         if (it == segBuf.end()) { chainStatus = "Conversation not in buffer."; return; }
@@ -601,15 +632,15 @@ int main() {
         std::sort(seg.begin(), seg.end(), [](const auto& a, const auto& b){
             return a.sentAt != b.sentAt ? a.sentAt < b.sentAt : a.messageId < b.messageId;
         });
-        int idx   = ++segIdx[chainConvInput];
+        int idx = ++segIdx[chainConvInput];
         auto proof = BlockchainManager::buildSegmentProof(seg, chainConvInput, idx);
         try {
-            auto f = BlockchainManager::writeSegmentFile(seg, proof);
-            chainStatus = "Root: " + proof.segmentRoot.substr(0, 22) + "…";
-            chainLines.push_back("Segment: " + proof.segmentRef +
-                                 "  msgs: " + std::to_string(proof.messageCount));
-            chainLines.push_back("Run to record: node " + std::string(BLOCKCHAIN_SCRIPT) + " " + f);
+            auto segFile = BlockchainManager::writeSegmentFile(seg, proof);
             buf.erase(buf.begin(), buf.begin() + (ptrdiff_t)seg.size());
+            chainLines.push_back("Segment : " + proof.segmentRef);
+            chainLines.push_back("Root    : " + proof.segmentRoot);
+            chainLines.push_back("File    : " + segFile);
+            chainStatus = "Exported. Open Testing/record.html and paste " + segFile;
         } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
     });
 

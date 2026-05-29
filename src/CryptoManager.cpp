@@ -12,6 +12,7 @@
 #include <cassert>
 #include <fstream>
 #include <cstring>
+#include <algorithm>
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -528,8 +529,8 @@ std::string CryptoManager::base64Encode(const std::vector<uint8_t>& data) {
     EVP_ENCODE_CTX_free(ctx);
 
     out.resize(static_cast<std::size_t>(written + finalWritten));
-    // Strip any trailing newlines inserted by EVP_Encode.
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    out.erase(std::remove_if(out.begin(), out.end(),
+        [](char c){ return c == '\n' || c == '\r'; }), out.end());
     return out;
 }
 

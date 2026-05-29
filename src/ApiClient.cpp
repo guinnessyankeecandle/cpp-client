@@ -69,7 +69,10 @@ nlohmann::json ApiClient::doPost(const std::string& path,
                                   std::to_string(httpCode) + "): " + response);
 
     if (httpCode >= 400) {
-        std::string detail = j.value("detail", response);
+        auto& d = j["detail"];
+        std::string detail = j.contains("detail")
+            ? (d.is_string() ? d.get<std::string>() : d.dump())
+            : response;
         throw std::runtime_error("HTTP " + std::to_string(httpCode) + ": " + detail);
     }
     return j;
@@ -106,8 +109,13 @@ nlohmann::json ApiClient::doGet(const std::string& path, const std::string& acce
     auto j = nlohmann::json::parse(response, nullptr, false);
     if (j.is_discarded())
         throw std::runtime_error("Invalid JSON (HTTP " + std::to_string(httpCode) + "): " + response);
-    if (httpCode >= 400)
-        throw std::runtime_error("HTTP " + std::to_string(httpCode) + ": " + j.value("detail", response));
+    if (httpCode >= 400) {
+        auto& d = j["detail"];
+        std::string detail = j.contains("detail")
+            ? (d.is_string() ? d.get<std::string>() : d.dump())
+            : response;
+        throw std::runtime_error("HTTP " + std::to_string(httpCode) + ": " + detail);
+    }
     return j;
 }
 
@@ -148,7 +156,10 @@ nlohmann::json ApiClient::doDelete(const std::string& path,
     if (httpCode >= 400) {
         auto j = nlohmann::json::parse(response, nullptr, false);
         throw std::runtime_error("HTTP " + std::to_string(httpCode) + ": " +
-                                  (j.is_discarded() ? response : j.value("detail", response)));
+                                  (j.is_discarded() ? response
+                                   : j.contains("detail")
+                                     ? (j["detail"].is_string() ? j["detail"].get<std::string>() : j["detail"].dump())
+                                     : response));
     }
     if (response.empty()) return nullptr;
     return nlohmann::json::parse(response, nullptr, false);
