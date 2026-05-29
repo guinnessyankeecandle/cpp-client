@@ -5,7 +5,6 @@
 #include "CryptoManager.hpp"
 #include "Group.hpp"
 #include "BlockchainManager.hpp"
-
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -70,6 +69,29 @@ static constexpr int SCR_TOTP       = 3;
 static constexpr int SCR_PASSPHRASE = 4;
 static constexpr int SCR_MAIN       = 5;
 
+static Element qrElement(const std::string& uri) {
+    FILE* pipe = popen(("qrencode -t UTF8 -o - -- " + uri).c_str(), "r");
+    if (!pipe)
+        return paragraph(" Could not run qrencode. Install it with: sudo dnf install qrencode ") | color(Color::Red);
+
+    std::string output;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), pipe))
+        output += buf;
+
+    int exit_code = pclose(pipe);
+    if (exit_code != 0 || output.empty())
+        return paragraph(" qrencode failed. Install it with: sudo dnf install qrencode ") | color(Color::Red);
+
+    Elements rows;
+    std::istringstream stream(output);
+    std::string line;
+    while (std::getline(stream, line))
+        rows.push_back(text(line));
+
+    return vbox(std::move(rows));
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -80,7 +102,7 @@ int main() {
     int scr = SCR_WELCOME;
 
     // Auth inputs
-    std::string regUser, regPass, regStatus;
+    std::string regUser, regPass, regStatus, regTotpUri;
     std::string loginUser, loginPass, loginStatus;
     std::string totpCode, totpStatus;
     std::string passStr, passStatus;
@@ -183,13 +205,14 @@ int main() {
             auto verifier = CryptoManager::computeSrpVerifier(regUser, regPass, saltHex);
             auto res = api.registerUser(regUser, saltHex, verifier);
             std::string msg = "Registered! User ID: " + std::to_string(res["user_id"].get<int>());
-            if (res.contains("totp_provisioning_uri"))
-                msg += "\n\nScan TOTP URI in authenticator:\n" +
-                       res["totp_provisioning_uri"].get<std::string>();
+            if (res.contains("totp_provisioning_uri")) {
+                regTotpUri = res["totp_provisioning_uri"].get<std::string>();
+                msg += " — scan the QR code below.";
+            }
             regStatus = msg;
         } catch (const std::exception& e) { regStatus = "Error: " + std::string(e.what()); }
     });
-    auto rBtn_back = Button(" Back ", [&]{ scr = SCR_WELCOME; regStatus.clear(); });
+    auto rBtn_back = Button(" Back ", [&]{ scr = SCR_WELCOME; regStatus.clear(); regTotpUri.clear(); });
 
     auto register_comp = Renderer(
         Container::Vertical({rUser, rPass, rBtn_submit, rBtn_back}),
@@ -207,6 +230,12 @@ int main() {
                         regStatus.empty() ? text("") :
                             paragraph(" " + regStatus) | color(
                                 regStatus.rfind("Error", 0) == 0 ? Color::Red : Color::Green),
+                        regTotpUri.empty() ? text("") : separator(),
+                        regTotpUri.empty() ? text("") :
+                            vbox({
+                                text(" Scan with your authenticator app: ") | dim | center,
+                                qrElement(regTotpUri) | center,
+                            }),
                     }) | border | size(WIDTH, GREATER_THAN, 52),
                 filler()}),
             filler()});
