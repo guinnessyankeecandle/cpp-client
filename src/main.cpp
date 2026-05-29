@@ -118,6 +118,15 @@ int main() {
     std::map<std::string, int> segIdx;
     std::vector<std::string> chainLines;
     std::string chainConvInput, chainStatus;
+    // Per-session digest & proof state
+    std::vector<MessageEnvelope>  chainLastEnvs;
+    SegmentDigest                 chainDigest;
+    std::vector<nlohmann::json>   chainProofPackages;
+    std::string chainProofInput;      // user pastes chain proof JSON here
+    std::string chainContractAddr;
+    std::string chainRpcUrl = "https://rpc.sepolia.org";
+    std::string chainVerifyInput;     // user pastes one proof package JSON here
+    std::string chainVerifyResult;
 
     // Main tab
     int mainTab = 0;
@@ -609,7 +618,11 @@ int main() {
 
     // ── Main — Blockchain tab ─────────────────────────────────────────────────
 
-    auto cConvIn = Input(&chainConvInput, "e.g. direct-1-2");
+    auto cConvIn       = Input(&chainConvInput,   "conversation ID, e.g. direct-1-2");
+    auto cContractIn   = Input(&chainContractAddr, "0x contract address");
+    auto cRpcIn        = Input(&chainRpcUrl,       "RPC URL");
+    auto cProofIn      = Input(&chainProofInput,   "paste chain proof JSON here");
+    auto cVerifyIn     = Input(&chainVerifyInput,  "paste proof package JSON here");
 
     auto cBtn_refresh = Button(" Refresh ", [&]{
         chainLines.clear();
@@ -622,30 +635,84 @@ int main() {
         chainStatus = std::to_string(segBuf.size()) + " conversation(s) buffered.";
     });
 
-    auto cBtn_record = Button(" Export Segment ", [&]{
-        if (chainConvInput.empty()) { chainStatus = "Enter a conversation ID."; return; }
-        auto it = segBuf.find(chainConvInput);
-        if (it == segBuf.end()) { chainStatus = "Conversation not in buffer."; return; }
-        auto& buf = it->second;
-        std::vector<MessageEnvelope> seg(buf.begin(),
-            buf.begin() + std::min((int)buf.size(), SEGMENT_SIZE));
-        std::sort(seg.begin(), seg.end(), [](const auto& a, const auto& b){
-            return a.sentAt != b.sentAt ? a.sentAt < b.sentAt : a.messageId < b.messageId;
-        });
-        int idx = ++segIdx[chainConvInput];
-        auto proof = BlockchainManager::buildSegmentProof(seg, chainConvInput, idx);
+    auto cBtn_export = Button(" Export Segment ", [&]{
         try {
-            auto segFile = BlockchainManager::writeSegmentFile(seg, proof);
+            if (chainConvInput.empty()) { chainStatus = "Enter a conversation ID."; return; }
+            auto it = segBuf.find(chainConvInput);
+            if (it == segBuf.end()) { chainStatus = "Conversation not in buffer."; return; }
+            auto& buf = it->second;
+            std::vector<MessageEnvelope> seg(buf.begin(),
+                buf.begin() + std::min((int)buf.size(), SEGMENT_SIZE));
+            std::sort(seg.begin(), seg.end(), [](const auto& a, const auto& b){
+                return a.sentAt != b.sentAt ? a.sentAt < b.sentAt : a.messageId < b.messageId;
+            });
+            int idx = ++segIdx[chainConvInput];
+            chainDigest  = BlockchainManager::buildSegmentDigest(seg, chainConvInput, idx);
+            chainLastEnvs = seg;
+            chainProofPackages.clear();
+            auto segFile = BlockchainManager::writeSegmentFile(seg, chainDigest);
             buf.erase(buf.begin(), buf.begin() + (ptrdiff_t)seg.size());
-            chainLines.push_back("Segment : " + proof.segmentRef);
-            chainLines.push_back("Root    : " + proof.segmentRoot);
+            chainLines.clear();
+            chainLines.push_back("Segment : " + chainDigest.segmentId);
+            chainLines.push_back("Hash    : " + chainDigest.segmentHash);
             chainLines.push_back("File    : " + segFile);
-            chainStatus = "Exported. Open Testing/record.html and paste " + segFile;
+            chainStatus = "Exported " + segFile + ". Record on Sepolia, then Import Proof.";
         } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
     });
 
+    auto cBtn_importProof = Button(" Import Proof ", [&]{
+        try {
+            if (chainProofInput.empty()) { chainStatus = "Paste chain proof JSON first."; return; }
+            if (chainLastEnvs.empty())   { chainStatus = "Export a segment first."; return; }
+            auto j = nlohmann::json::parse(chainProofInput, nullptr, false);
+            if (j.is_discarded()) { chainStatus = "Invalid JSON."; return; }
+            chainDigest.transactionHash    = j.value("transaction_hash",   "");
+            chainDigest.contractAddress    = j.value("contract_address",   "");
+            chainDigest.recorder           = j.value("recorder",           "");
+            chainDigest.recordedTimestamp  = j.value("recorded_timestamp", uint64_t{0});
+            chainDigest.chainId            = j.value("chain_id",           11155111);
+            chainDigest.chainName          = j.value("chain_name",         "sepolia");
+            if (!chainContractAddr.empty()) chainDigest.contractAddress = chainContractAddr;
+            chainProofPackages = BlockchainManager::buildProofPackages(chainLastEnvs, chainDigest);
+            chainLines.push_back("Tx      : " + chainDigest.transactionHash);
+            chainLines.push_back("Recorder: " + chainDigest.recorder);
+            chainStatus = "Proof imported. " + std::to_string(chainProofPackages.size()) +
+                          " package(s) ready. Press Export Proof Package.";
+        } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
+    });
+
+    auto cBtn_exportPkg = Button(" Export Proof Package ", [&]{
+        try {
+            if (chainProofPackages.empty()) { chainStatus = "Import chain proof first."; return; }
+            auto path = BlockchainManager::writeProofPackagesFile(chainProofPackages, chainDigest.segmentId);
+            chainStatus = "Proof packages written to " + path;
+        } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
+    });
+
+    auto cBtn_verify = Button(" Verify Integrity ", [&]{
+        try {
+            if (chainVerifyInput.empty()) { chainVerifyResult = "Paste a proof package JSON first."; return; }
+            auto pkg = nlohmann::json::parse(chainVerifyInput, nullptr, false);
+            if (pkg.is_discarded()) { chainVerifyResult = "Invalid JSON."; return; }
+
+            std::string localResult = BlockchainManager::verifyLocalHashes(pkg);
+            if (localResult != "OK") { chainVerifyResult = localResult; return; }
+
+            if (chainRpcUrl.empty()) {
+                chainVerifyResult = "Local: OK. (Set RPC URL to also check on-chain.)";
+                return;
+            }
+            chainVerifyResult = "Local: OK. Querying chain…";
+            std::string onChain = BlockchainManager::verifyOnChain(pkg, chainRpcUrl);
+            chainVerifyResult = "Local: OK | Chain: " + onChain;
+        } catch (const std::exception& e) { chainVerifyResult = "Error: " + std::string(e.what()); }
+    });
+
     auto blockchain_tab = Renderer(
-        Container::Vertical({cConvIn, cBtn_refresh, cBtn_record}),
+        Container::Vertical({cConvIn, cContractIn, cRpcIn,
+                             cBtn_refresh, cBtn_export,
+                             cProofIn, cBtn_importProof, cBtn_exportPkg,
+                             cVerifyIn, cBtn_verify}),
         [&]{
             Elements ls; for (auto& l : chainLines) ls.push_back(text(l));
             if (ls.empty()) ls.push_back(text("Press Refresh to see buffered conversations.") | dim);
@@ -654,9 +721,19 @@ int main() {
                 separator(),
                 hbox({cBtn_refresh->Render(), filler()}),
                 separator(),
-                hbox({text(" Conv: "), cConvIn->Render() | flex,
-                      text("  "), cBtn_record->Render()}),
-                text(" " + chainStatus) | color(Color::Cyan),
+                hbox({text(" Conv    : "), cConvIn->Render() | flex,
+                      text("  "), cBtn_export->Render()}),
+                hbox({text(" Contract: "), cContractIn->Render() | flex}),
+                hbox({text(" RPC URL : "), cRpcIn->Render() | flex}),
+                separator(),
+                hbox({text(" Proof   : "), cProofIn->Render() | flex,
+                      text("  "), cBtn_importProof->Render()}),
+                hbox({filler(), cBtn_exportPkg->Render(), filler()}),
+                separator(),
+                hbox({text(" Verify  : "), cVerifyIn->Render() | flex,
+                      text("  "), cBtn_verify->Render()}),
+                text(" " + (chainVerifyResult.empty() ? chainStatus : chainVerifyResult))
+                    | color(Color::Cyan),
             });
         }
     );
@@ -682,6 +759,8 @@ int main() {
         accessToken.clear(); refreshToken.clear(); myPriv.clear(); myPub.clear(); myUserId = 0;
         msgLines.clear(); grpListLines.clear(); grpMsgLines.clear();
         chainLines.clear(); segBuf.clear(); store.clear();
+        chainLastEnvs.clear(); chainDigest = {}; chainProofPackages.clear();
+        chainProofInput.clear(); chainVerifyInput.clear(); chainVerifyResult.clear();
         scr = SCR_WELCOME;
         setStatus("Logged out.");
     });
