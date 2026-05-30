@@ -96,7 +96,7 @@ jobs:
       - name: Run under ${{ matrix.name }}
         env:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
-          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan.supp"
+          LSAN_OPTIONS: "suppressions=$GITHUB_WORKSPACE/lsan.supp"
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
           TSAN_OPTIONS: "halt_on_error=1"
         run: ctest --test-dir build --output-on-failure
