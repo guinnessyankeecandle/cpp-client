@@ -115,21 +115,21 @@ export KeyBundle keystoreLoad(const std::string &path,
   };
 
   KeyBundle kb;
-  kb.ik.priv = read(32);
-  kb.ik.pub = read(32);
-  kb.spk.priv = read(32);
-  kb.spk.pub = read(32);
-  kb.spkSig = read(64);
-  kb.pq.priv = read(3168);
-  kb.pq.pub = read(1568);
-  kb.pqSig = read(64);
+  kb.ik.priv = read(ED25519_PRIV_BYTES);
+  kb.ik.pub = read(ED25519_PUB_BYTES);
+  kb.spk.priv = read(X25519_KEY_BYTES);
+  kb.spk.pub = read(X25519_KEY_BYTES);
+  kb.spkSig = read(ED25519_SIG_BYTES);
+  kb.pq.priv = read(MLKEM1024_PRIV_BYTES);
+  kb.pq.pub = read(MLKEM1024_PUB_BYTES);
+  kb.pqSig = read(ED25519_SIG_BYTES);
 
   const uint8_t opkCount = read(1)[0];
   kb.opks.reserve(opkCount);
   for (uint8_t i = 0; i < opkCount; ++i) {
     X25519KeyPair opk;
-    opk.priv = read(32);
-    opk.pub = read(32);
+    opk.priv = read(X25519_KEY_BYTES);
+    opk.pub = read(X25519_KEY_BYTES);
     kb.opks.push_back(std::move(opk));
   }
 

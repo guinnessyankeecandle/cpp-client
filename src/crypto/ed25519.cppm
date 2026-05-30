@@ -28,9 +28,11 @@ export Ed25519KeyPair ed25519Generate() {
     throw std::runtime_error("EVP_PKEY_CTX_new_id Ed25519 failed");
   sslAssert(EVP_PKEY_keygen_init(ctx.get()), "Ed25519 keygen_init");
 
-  EVP_PKEY *keyPair = nullptr;
-  sslAssert(EVP_PKEY_keygen(ctx.get(), &keyPair), "Ed25519 keygen");
-  const auto key_pair_ptr = PkeyPtr(keyPair);
+  const auto key_pair_ptr = [&] {
+    EVP_PKEY *tmp = nullptr;
+    sslAssert(EVP_PKEY_keygen(ctx.get(), &tmp), "Ed25519 keygen");
+    return PkeyPtr(tmp);
+  }();
 
   Ed25519KeyPair kp;
   kp.priv.resize(ED25519_PRIV_BYTES);

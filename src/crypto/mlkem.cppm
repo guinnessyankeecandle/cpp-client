@@ -1,7 +1,4 @@
 module;
-#include <cstdint>
-#include <openssl/core_names.h>
-#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <stdexcept>
 #include <vector>
@@ -23,53 +20,56 @@ export struct MlKemEncapResult {
   std::vector<uint8_t> sharedSecret;
 };
 
-export MlKemKeyPair mlkemGenerate() {
-  using PkeyCtxPtr = OsslHandle<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
-  using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;
+using PkeyCtxPtr =
+    OsslHandle<EVP_PKEY_CTX,
+               EVP_PKEY_CTX_free>; // public-private key operation context
+using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>; // public-private key
 
-  auto ctx =
+export MlKemKeyPair mlkemGenerate() {
+  const auto ctx =
       PkeyCtxPtr(EVP_PKEY_CTX_new_from_name(nullptr, "ML-KEM-1024", nullptr));
   if (!ctx)
     throw std::runtime_error("ML-KEM-1024 CTX_new failed");
+
   sslAssert(EVP_PKEY_keygen_init(ctx.get()), "ML-KEM-1024 keygen_init");
 
-  EVP_PKEY *raw = nullptr;
-  sslAssert(EVP_PKEY_keygen(ctx.get(), &raw), "ML-KEM-1024 keygen");
-  auto pkey = PkeyPtr(raw);
+  const auto pkey = [&] {
+    EVP_PKEY *tmp = nullptr;
+    sslAssert(EVP_PKEY_keygen(ctx.get(), &tmp), "ML-KEM-1024 keygen");
+    return PkeyPtr(tmp);
+  }();
 
   MlKemKeyPair kp;
   std::size_t privLen = 0, pubLen = 0;
+
   EVP_PKEY_get_raw_private_key(pkey.get(), nullptr, &privLen);
   EVP_PKEY_get_raw_public_key(pkey.get(), nullptr, &pubLen);
+
   kp.priv.resize(privLen);
   kp.pub.resize(pubLen);
+
   sslAssert(EVP_PKEY_get_raw_private_key(pkey.get(), kp.priv.data(), &privLen),
             "ML-KEM-1024 get_raw_private_key");
+
   sslAssert(EVP_PKEY_get_raw_public_key(pkey.get(), kp.pub.data(), &pubLen),
             "ML-KEM-1024 get_raw_public_key");
   return kp;
 }
 
 export MlKemEncapResult mlkemEncap(const std::vector<uint8_t> &pubKey) {
-  using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;
-  using PkeyCtxPtr = OsslHandle<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
-
-  auto pub = PkeyPtr(EVP_PKEY_new_raw_public_key_ex(
+  const auto pub = PkeyPtr(EVP_PKEY_new_raw_public_key_ex(
       nullptr, "ML-KEM-1024", nullptr, pubKey.data(), pubKey.size()));
   if (!pub)
     throw std::runtime_error("ML-KEM-1024 new_raw_public_key failed");
-
-  auto ctx =
+  const auto ctx =
       PkeyCtxPtr(EVP_PKEY_CTX_new_from_pkey(nullptr, pub.get(), nullptr));
   if (!ctx)
     throw std::runtime_error("ML-KEM-1024 CTX_new_from_pkey failed");
   sslAssert(EVP_PKEY_encapsulate_init(ctx.get(), nullptr),
             "ML-KEM-1024 encap_init");
-
   std::size_t ctLen = 0, ssLen = 0;
   sslAssert(EVP_PKEY_encapsulate(ctx.get(), nullptr, &ctLen, nullptr, &ssLen),
             "ML-KEM-1024 encap size");
-
   MlKemEncapResult res;
   res.ciphertext.resize(ctLen);
   res.sharedSecret.resize(ssLen);
@@ -81,26 +81,20 @@ export MlKemEncapResult mlkemEncap(const std::vector<uint8_t> &pubKey) {
 
 export std::vector<uint8_t> mlkemDecap(const std::vector<uint8_t> &privKey,
                                        const std::vector<uint8_t> &ciphertext) {
-  using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;
-  using PkeyCtxPtr = OsslHandle<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
-
-  auto priv = PkeyPtr(EVP_PKEY_new_raw_private_key_ex(
+  const auto priv = PkeyPtr(EVP_PKEY_new_raw_private_key_ex(
       nullptr, "ML-KEM-1024", nullptr, privKey.data(), privKey.size()));
   if (!priv)
     throw std::runtime_error("ML-KEM-1024 new_raw_private_key failed");
-
-  auto ctx =
+  const auto ctx =
       PkeyCtxPtr(EVP_PKEY_CTX_new_from_pkey(nullptr, priv.get(), nullptr));
   if (!ctx)
     throw std::runtime_error("ML-KEM-1024 CTX_new_from_pkey failed");
   sslAssert(EVP_PKEY_decapsulate_init(ctx.get(), nullptr),
             "ML-KEM-1024 decap_init");
-
   std::size_t ssLen = 0;
   sslAssert(EVP_PKEY_decapsulate(ctx.get(), nullptr, &ssLen, ciphertext.data(),
                                  ciphertext.size()),
             "ML-KEM-1024 decap size");
-
   std::vector<uint8_t> ss(ssLen);
   sslAssert(EVP_PKEY_decapsulate(ctx.get(), ss.data(), &ssLen,
                                  ciphertext.data(), ciphertext.size()),
