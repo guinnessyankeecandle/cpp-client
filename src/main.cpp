@@ -622,7 +622,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
 int main() {
   auto scr = ScreenInteractive::Fullscreen();
-  ApiClient api("https://BobbyTables.theburkenator.com", /*verifyTls=*/true);
+  ApiClient api("https://BobbyTables.theburkenator.com");
   AppState state;
 
   int screenIdx = 0;

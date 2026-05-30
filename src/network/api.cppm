@@ -9,7 +9,7 @@ import securemsg.network.http;
 
 export class ApiClient {
 public:
-  explicit ApiClient(std::string baseUrl, bool verifyTls = true)
+  explicit ApiClient(std::string baseUrl)
       : m_http(std::move(baseUrl), verifyTls) {}
 
   // ── Auth ─────────────────────────────────────────────────────────────────
