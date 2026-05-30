@@ -21,4 +21,5 @@ jobs:
             --error-exitcode=1 \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
+            --suppress=unmatchedSuppression \
             src/
