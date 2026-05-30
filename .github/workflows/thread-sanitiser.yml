@@ -1,0 +1,34 @@
+name: Thread Sanitiser
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tsan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y ninja-build cmake clang
+
+      - name: Configure with TSan
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build
+        run: cmake --build build --target cybersec_tests
+
+      - name: Run tests under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure

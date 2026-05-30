@@ -1,98 +1,150 @@
 # SecureMsg C++ Client
 
-A command-line secure messaging client for the CS4455 Epic project.
+A terminal UI secure messaging client implementing the full Signal Protocol with post-quantum cryptography.
 
 ## What it does
 
-- Registers and logs in using **SRP-6a** zero-knowledge password authentication (2048-bit group, SHA-256)
-- Encrypts messages end-to-end with **AES-256-GCM** using keys derived via a simplified **HPKE Mode_Auth** key exchange (X25519 static + ephemeral DH → HKDF-SHA256)
-- Sends and receives encrypted messages over **HTTPS** using libcurl (TLS certificate verification enabled)
-- Stores the local X25519 identity key encrypted at rest (**PBKDF2-HMAC-SHA256**, 600,000 iterations + AES-256-GCM)
+- **PQXDH session establishment** — hybrid X25519 + ML-KEM-1024 key agreement. Both primitives must be broken to compromise a session. Protects against harvest-now-decrypt-later attacks.
+- **Double Ratchet messaging** — per-message forward secrecy (symmetric ratchet) and break-in recovery (DH ratchet). Ratchet headers are encrypted to hide session progression from the server.
+- **Group messaging** — Signal Sender Key protocol. O(1) encryptions per group message regardless of group size.
+- **SRP-6a authentication** — zero-knowledge password proof (4096-bit group, SHA-256). The server never sees your password. Mutual proofs detect MITM attacks.
+- **TOTP 2FA** — required on every login.
+- **All crypto via OpenSSL 3.5** — no hand-rolled primitives.
+
+## Build and run
+
+```bash
+./start.sh
+```
+
+This installs all dependencies, compiles, and launches the app. Requires `sudo` on first run to install packages.
 
 ## Dependencies
 
-| Library | Purpose |
+| Package (Fedora/dnf) | Package (Debian/apt) | Purpose |
+|---|---|---|
+| `gcc-c++` | `g++` | C++23 compiler |
+| `cmake` | `cmake` | Build system |
+| `make` | `make` | Build tool |
+| `ninja-build` | `ninja-build` | Required generator for C++20 modules |
+| `clang` | `clang` | Clang compiler (CI / coverage builds) |
+| `openssl-devel` | `libssl-dev` | All crypto: AES-GCM, Ed25519, X25519, ML-KEM-1024, HKDF, PBKDF2, SRP |
+| `libcurl-devel` | `libcurl4-openssl-dev` | HTTPS API calls |
+| `nlohmann-json-devel` | `nlohmann-json3-dev` | JSON parsing |
+| `ftxui-devel` | `libftxui-dev` | Terminal UI framework |
+| `catch2-devel` | `catch2-dev` | Unit test framework |
+| `qrencode` | `qrencode` | TOTP QR code rendering in terminal |
+| `glibc-devel` | `linux-libc-dev` | System headers required by GCC 16 |
+| `kernel-headers` | _(included above)_ | Kernel headers required by GCC 16 |
+
+## Cryptographic design
+
+### Key hierarchy
+
+```
+Identity Key (IK)     Ed25519  — signs prekeys; proves sender identity
+Signed Prekey (SPK)   X25519   — signed by IK; rotated periodically
+One-Time Prekeys      X25519   — consumed one per session; replenished when < 10 remain
+PQ Prekey             ML-KEM-1024 — signed by IK; post-quantum forward secrecy
+```
+
+All keys are stored encrypted in `identity.key` using AES-256-GCM with a key derived from your login password via PBKDF2-HMAC-SHA256 (600,000 iterations, OWASP 2023). **Key generation is fully automatic** — on first login the full bundle (Ed25519 IK, X25519 SPK + 20 OPKs, ML-KEM-1024 PQ prekey) is generated, encrypted, saved, and published to the server without any user interaction.
+
+### PQXDH session establishment
+
+Hybrid key agreement combining X25519 and ML-KEM-1024, following the [Signal PQXDH specification](https://signal.org/docs/specifications/pqxdh/).
+
+**Sender side:**
+1. Verify recipient's SPK and PQ prekey signatures against their Ed25519 identity key
+2. Generate ephemeral X25519 key pair `EK`
+3. Compute four X25519 DH values:
+   ```
+   DH1 = X25519(sender_IK,  recipient_SPK)   — authenticates sender
+   DH2 = X25519(sender_EK,  recipient_IK)    — forward secrecy
+   DH3 = X25519(sender_EK,  recipient_SPK)   — binds ephemeral to SPK
+   DH4 = X25519(sender_EK,  recipient_OPK)   — one-time key (if available)
+   ```
+4. Encapsulate ML-KEM-1024: `(pq_ciphertext, pq_ss) = ML-KEM.Encap(recipient_pq_pub)`
+5. Derive session key:
+   ```
+   IKM = 0xFF×32 || DH1 || DH2 || DH3 || DH4 || pq_ss
+   SK  = HKDF-SHA256(IKM, salt="", info="PQXDH-v1")
+   ```
+
+**Why `0xFF×32` prefix?**
+The 32-byte `0xFF` binder is prepended to the IKM per the Signal PQXDH spec. It prevents a downgrade attack where an adversary tricks a PQXDH client into completing a classical X3DH exchange instead — the binder makes the two protocols' IKM values structurally incompatible.
+
+**Why `info="PQXDH-v1"`?**
+The HKDF `info` parameter provides domain separation. Even if two different protocol versions or key purposes derived keys from the same IKM, the different `info` string guarantees different output keys. This prevents cross-protocol key confusion attacks.
+
+**Why no explicit salt?**
+HKDF-SHA256 defaults to a zeroed 32-byte salt when none is provided — an explicit `0x00×32` salt is identical and adds nothing. The security of HKDF comes from the IKM entropy (5 DH/KEM outputs), not the salt.
+
+6. Seed Double Ratchet with `SK`
+
+**Receiver side verification:**
+
+Before deriving the session key, the receiver:
+1. Checks the **local identity cache** (`known_identities.json`) for the sender's stored Ed25519 public key — the server is only consulted the very first time a sender is seen (TOFU). A locally cached key is always trusted over the server.
+2. Verifies `sender.IK_pub` in the header matches the cached key — rejects and warns if not
+3. Verifies the `used_opk_id` corresponds to an OPK they actually generated — rejects if unrecognised
+4. Recomputes DH1–DH4 and decapsulates ML-KEM symmetrically
+5. Derives `SK` — if the subsequent AEAD decryption succeeds, the sender's identity is implicitly confirmed (a forged `IK_pub` would produce the wrong `SK` and fail authentication)
+
+**Verifying identity out-of-band:**
+
+Press `i` on any conversation to view the contact's Ed25519 identity public key. Compare it with the contact directly (voice call, in person) to confirm no MITM is present. Once verified, mark it as trusted — a checkmark appears next to their name. If a key mismatch is ever detected, a red warning is shown with the old and new keys side by side.
+
+### Double Ratchet
+
+Provides per-message forward secrecy and break-in recovery. Ratchet headers (`ratchet_header_enc`) are encrypted to hide session state from the server.
+
+- **Symmetric ratchet** — chain key advances per message; each message uses a unique key. Compromise of one message key exposes no others.
+- **DH ratchet** — root key advances when the remote party sends a new DH ratchet key. Limits the window of exposure after a key compromise.
+
+### Security properties
+
+| Property | Mechanism |
 |---|---|
-| OpenSSL ≥ 1.1.0 | AES-GCM, X25519, HKDF, SRP bignum arithmetic, PBKDF2 |
-| libcurl | HTTPS API calls |
-| nlohmann/json | JSON (fetched automatically by CMake via FetchContent) |
+| Password never sent | SRP-6a zero-knowledge proof |
+| Server can't read messages | E2E encryption; server stores ciphertext only |
+| Post-quantum forward secrecy | ML-KEM-1024 in PQXDH; both X25519 and ML-KEM must be broken |
+| Per-message forward secrecy | Double Ratchet symmetric chain |
+| Break-in recovery | Double Ratchet DH ratchet |
+| Prekey authenticity | Ed25519 signatures on SPK and PQ prekey |
+| Timing-safe comparisons | `CRYPTO_memcmp` for all MAC/proof/hash comparisons |
+| Secure key zeroing | `OPENSSL_cleanse` on all sensitive buffers |
+| Memory safety | No raw owning pointers; RAII for all OpenSSL handles |
 
-Install system packages (Ubuntu/Debian):
+### Cryptographic security levels
 
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake libssl-dev libcurl4-openssl-dev git
-```
-
-## Build
-
-```bash
-cd cpp-client
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-```
-
-The binary is at `build/securemsg`.
-
-## Run
-
-```bash
-./build/securemsg
-```
-
-By default the client connects to `https://drop-table.theburkenator.com`.
-To point at a different backend edit the `BASE_URL` constant in [src/main.cpp](src/main.cpp#L14).
-
-If you are testing locally with a self-signed certificate, set `verifyTls = false` in [src/main.cpp](src/main.cpp#L242).
-
-## Usage
-
-```
-=== SecureMsg C++ Client ===
-  1) Register
-  2) Login
-  0) Quit
-```
-
-1. **Register** — enter a username and password.  The SRP verifier is computed locally; the plaintext password is never sent.  After registration, scan the TOTP URI in an authenticator app (Google Authenticator, Authy, etc.).
-
-2. **Login** — SRP-6a three-step handshake (init → proof → TOTP).  Both sides verify each other's proofs.  After login, choose a passphrase to protect your local identity key.
-
-3. **Publish my public key** — uploads your X25519 identity public key to the server so others can send you encrypted messages.
-
-4. **Send message** — fetches the recipient's public key, performs X25519 DH, derives a message key via HKDF, and encrypts with AES-256-GCM.  The ephemeral public key is sent alongside the ciphertext so the recipient can reproduce the shared secret.
-
-5. **Fetch & decrypt messages** — downloads ciphertexts, recovers the message key using your private key and the sender's public key, and decrypts each message.
-
-6. **Acknowledge receipt** — sends a receipt to the server, which deletes the server-side copy of the message.
-
-7. **Revoke a sent message** — uses the single-use revocation token to delete a message before it is read.
+| Primitive | Classical | Post-quantum |
+|---|---|---|
+| AES-256-GCM | 256-bit | 128-bit (Grover) |
+| X25519 | 128-bit | Broken by Shor |
+| ML-KEM-1024 | 256-bit | 128-bit |
+| X25519 + ML-KEM-1024 hybrid | 128-bit | 128-bit (both must break) |
+| Ed25519 | 128-bit | Broken by Shor |
+| SRP-6a (4096-bit) | ~140-bit | Broken by Shor |
+| HKDF-SHA256 | 128-bit | 128-bit |
 
 ## Code structure
 
 ```
-include/
-  User.hpp          — user model (id, username, tokens)
-  Message.hpp       — message model (ciphertext, direction, plaintext after decrypt)
-  MessageStore.hpp  — local message cache (std::vector + std::unordered_map for O(1) lookup)
-  ApiClient.hpp     — HTTP client (libcurl, all API endpoints)
-  CryptoManager.hpp — all crypto: AES-GCM, X25519, HKDF, SRP-6a, PBKDF2
-
-src/
-  main.cpp          — interactive CLI
-  User.cpp
-  Message.cpp
-  MessageStore.cpp
-  ApiClient.cpp
-  CryptoManager.cpp
+src/securemsg/
+  crypto/      — random, aead, kdf, ed25519, x25519, mlkem, pqxdh, ratchet, keystore, srp
+  network/     — http (CURL), api (all endpoints)
+  messaging/   — message model, store, send/receive pipeline
+  models/      — user, group
+main.cpp       — FTXUI terminal UI only
 ```
 
-## Key design decisions
+Each module has a co-located `.test.cpp` file. Run tests with:
 
-**AES-256-GCM** — standard AEAD; IV is 12 random bytes per message generated via `RAND_bytes`.  The packed wire format is `IV[12] | TAG[16] | CIPHERTEXT`.
+```bash
+cmake --preset ci && cmake --build --preset ci && ctest --test-dir build
+```
 
-**X25519 + HKDF-SHA256 key exchange** — simplified HPKE Mode_Auth.  Per-message IKM = `DH(senderStatic, recipientStatic) || DH(senderEphemeral, recipientStatic)`.  The static component authenticates the sender; the ephemeral component provides per-message forward secrecy.
+## Known limitations
 
-**SRP-6a** — 2048-bit RFC 5054 group, SHA-256.  Client computes `v = g^x mod N` locally during registration.  During login both parties exchange mutual proofs; a wrong proof terminates the session.
-
-**PBKDF2-HMAC-SHA256 / 600,000 iterations** — protects the local X25519 private key at rest.  Follows OWASP 2023 recommendation for PBKDF2-SHA256.
+See [Backend.md](Backend.md) — Known Limitations section. Key points: no sealed sender (server sees social graph), TOFU trust model, Ed25519 and SRP-6a are not post-quantum resistant.

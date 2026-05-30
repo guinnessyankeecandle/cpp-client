@@ -1,0 +1,38 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y ninja-build cmake clang clang-tidy
+
+      - name: Configure (generate compile_commands.json)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build (generate module maps)
+        env:
+          CC: clang
+          CXX: clang++
+        run: cmake --build build
+
+      - name: Run clang-tidy
+        run: |
+          find src -name '*.cpp' -o -name '*.cppm' | \
+            xargs clang-tidy -p build \
+              --config-file=.clang-tidy

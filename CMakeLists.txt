@@ -1,55 +1,81 @@
-cmake_minimum_required(VERSION 3.16)
-project(SecureMsgClient VERSION 1.0.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.28)
+project(SecureMsgClient VERSION 2.0.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 
-find_package(nlohmann_json QUIET)
+find_package(nlohmann_json REQUIRED)
+find_package(ftxui REQUIRED)
+find_package(Catch2 REQUIRED)
 
-include(FetchContent)
-if(NOT nlohmann_json_FOUND)
-    FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG v3.11.3
-        GIT_SHALLOW TRUE
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
-endif()
+# ── Models ────────────────────────────────────────────────────────────────────
+add_library(securemsg_models)
+target_sources(securemsg_models PUBLIC
+    FILE_SET CXX_MODULES FILES
+        src/securemsg/models/user.cppm
+        src/securemsg/models/group.cppm
+        src/securemsg/models/models.cppm)
+target_compile_options(securemsg_models PRIVATE -Wall -Wextra)
 
-FetchContent_Declare(
-    ftxui
-    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
-    GIT_TAG v5.0.0
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(ftxui)
+# ── Crypto ────────────────────────────────────────────────────────────────────
+add_library(securemsg_crypto)
+target_sources(securemsg_crypto PUBLIC
+    FILE_SET CXX_MODULES FILES
+        src/securemsg/crypto/random.cppm
+        src/securemsg/crypto/aead.cppm
+        src/securemsg/crypto/kdf.cppm
+        src/securemsg/crypto/ed25519.cppm
+        src/securemsg/crypto/x25519.cppm
+        src/securemsg/crypto/mlkem.cppm
+        src/securemsg/crypto/pqxdh.cppm
+        src/securemsg/crypto/ratchet.cppm
+        src/securemsg/crypto/keystore.cppm
+        src/securemsg/crypto/srp.cppm
+        src/securemsg/crypto/crypto.cppm)
+target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 
-add_executable(securemsg
-    src/main.cpp
-    src/User.cpp
-    src/Message.cpp
-    src/MessageStore.cpp
-    src/ApiClient.cpp
-    src/CryptoManager.cpp
-    src/Group.cpp
-    src/BlockchainManager.cpp
-)
+# ── Network ───────────────────────────────────────────────────────────────────
+add_library(securemsg_network)
+target_sources(securemsg_network PUBLIC
+    FILE_SET CXX_MODULES FILES
+        src/securemsg/network/http.cppm
+        src/securemsg/network/api.cppm
+        src/securemsg/network/network.cppm)
+target_link_libraries(securemsg_network PUBLIC CURL::libcurl nlohmann_json::nlohmann_json)
+target_compile_options(securemsg_network PRIVATE -Wall -Wextra)
 
-target_include_directories(securemsg PRIVATE include)
+# ── Messaging ─────────────────────────────────────────────────────────────────
+add_library(securemsg_messaging)
+target_sources(securemsg_messaging PUBLIC
+    FILE_SET CXX_MODULES FILES
+        src/securemsg/messaging/message.cppm
+        src/securemsg/messaging/store.cppm
+        src/securemsg/messaging/send_receive.cppm
+        src/securemsg/messaging/messaging.cppm)
+target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models)
+target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
+# ── Main binary ───────────────────────────────────────────────────────────────
+add_executable(securemsg src/main.cpp)
 target_link_libraries(securemsg PRIVATE
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    CURL::libcurl
-    nlohmann_json::nlohmann_json
-    ftxui::screen
-    ftxui::dom
-    ftxui::component
-)
-
+    securemsg_models securemsg_crypto securemsg_network securemsg_messaging
+    ftxui::screen ftxui::dom ftxui::component)
 target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+include(CTest)
+file(GLOB_RECURSE TEST_SOURCES src/**/*.test.cpp)
+if(TEST_SOURCES)
+    add_executable(cybersec_tests
+        src/securemsg/test_main.cpp
+        ${TEST_SOURCES})
+    target_link_libraries(cybersec_tests PRIVATE
+        securemsg_models securemsg_crypto securemsg_messaging
+        Catch2::Catch2)
+    add_test(NAME cybersec_tests COMMAND cybersec_tests)
+endif()

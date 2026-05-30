@@ -1,0 +1,43 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake clang llvm \
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \
+            libftxui-dev catch2-dev qrencode
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build-coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping" \
+            -Wno-dev
+      - name: Build tests
+        run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
+      - name: Run tests
+        run: |
+          LLVM_PROFILE_FILE="coverage-%p.profraw" \
+          ctest --test-dir build-coverage --output-on-failure
+      - name: Merge profiles
+        run: llvm-profdata merge -sparse coverage-*.profraw -o coverage.profdata
+      - name: Report coverage
+        run: |
+          llvm-cov report ./build-coverage/cybersec_tests \
+            -instr-profile=coverage.profdata \
+            --ignore-filename-regex='_deps|\.test\.cpp' \
+            | tee coverage_report.txt
+          awk '/TOTAL/{if ($10+0 < 95.0) {print "Coverage below 95%: " $10; exit 1}}' \
+            coverage_report.txt

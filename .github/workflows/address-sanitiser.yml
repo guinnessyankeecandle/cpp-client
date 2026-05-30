@@ -1,0 +1,31 @@
+name: Address Sanitiser
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+jobs:
+  asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake clang \
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \
+            libftxui-dev catch2-dev qrencode
+      - name: Configure with ASan
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" -Wno-dev
+      - name: Build
+        run: cmake --build build --target cybersec_tests -j$(nproc)
+      - name: Run under ASan
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+        run: ctest --test-dir build --output-on-failure
