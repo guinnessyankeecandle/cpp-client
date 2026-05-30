@@ -41,7 +41,7 @@ export MlKemKeyPair mlkemGenerate() {
 
   MlKemKeyPair key_pair;
 
-  //Get sizes
+  // Get sizes
   std::size_t privLen = 0, pubLen = 0;
   EVP_PKEY_get_raw_private_key(pkey_ptr.get(), nullptr, &privLen);
   EVP_PKEY_get_raw_public_key(pkey_ptr.get(), nullptr, &pubLen);
@@ -49,11 +49,13 @@ export MlKemKeyPair mlkemGenerate() {
   key_pair.priv.resize(privLen);
   key_pair.pub.resize(pubLen);
 
-  sslAssert(EVP_PKEY_get_raw_private_key(pkey_ptr.get(), key_pair.priv.data(), &privLen),
+  sslAssert(EVP_PKEY_get_raw_private_key(pkey_ptr.get(), key_pair.priv.data(),
+                                         &privLen),
             "ML-KEM-1024 get_raw_private_key");
 
-  sslAssert(EVP_PKEY_get_raw_public_key(pkey_ptr.get(), key_pair.pub.data(), &pubLen),
-            "ML-KEM-1024 get_raw_public_key");
+  sslAssert(
+      EVP_PKEY_get_raw_public_key(pkey_ptr.get(), key_pair.pub.data(), &pubLen),
+      "ML-KEM-1024 get_raw_public_key");
   return key_pair;
 }
 

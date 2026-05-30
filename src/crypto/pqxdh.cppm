@@ -12,8 +12,8 @@ import securemsg.crypto.ed25519;
 import securemsg.crypto.kdf;
 
 export struct RemoteKeyBundle {
-  std::vector<uint8_t>
-      ikEdPub; // Ed25519 pub — used for SPK/PQ signature verification
+  // Ed25519 pub — used for SPK/PQ signature verification
+  std::vector<uint8_t> ikEdPub;
   std::vector<uint8_t> ikXPub; // X25519 pub — used for DH2
   std::vector<uint8_t> spkPub;
   std::vector<uint8_t> spkSig;
@@ -35,10 +35,12 @@ export struct PqxdhInitialHeader {
   bool hadOpk{false};
 };
 
+// 32 x 0xFF prefix in IKM — prevents PQXDH keys being confused with X3DH keys
 static const std::vector<uint8_t> PQXDH_BINDER(32, 0xFF);
 
 export PqxdhSenderResult pqxdhSend(const X25519KeyPair &senderIk,
                                    const RemoteKeyBundle &remote) {
+
   if (!ed25519Verify(remote.ikEdPub, remote.spkPub, remote.spkSig))
     throw std::runtime_error("PQXDH: SPK signature invalid");
   if (!ed25519Verify(remote.ikEdPub, remote.pqPub, remote.pqSig))
@@ -63,15 +65,16 @@ export PqxdhSenderResult pqxdhSend(const X25519KeyPair &senderIk,
   }
   ikm.insert(ikm.end(), pqSs.begin(), pqSs.end());
 
-  auto sk = hkdf(ikm, {}, "PQXDH-v1", 32);
+  auto shared_key = hkdf(ikm, {}, "PQXDH-v1", 32);
 
+  // clear memory
   OPENSSL_cleanse(ikm.data(), ikm.size());
   OPENSSL_cleanse(dh1.data(), dh1.size());
   OPENSSL_cleanse(dh2.data(), dh2.size());
   OPENSSL_cleanse(dh3.data(), dh3.size());
   OPENSSL_cleanse(pqSs.data(), pqSs.size());
 
-  return {std::move(sk), std::move(ek.pub), std::move(pqCt)};
+  return {std::move(shared_key), std::move(ek.pub), std::move(pqCt)};
 }
 
 export std::vector<uint8_t>
@@ -99,7 +102,7 @@ pqxdhReceive(const X25519KeyPair &receiverIk, const X25519KeyPair &receiverSpk,
   }
   ikm.insert(ikm.end(), pqSs.begin(), pqSs.end());
 
-  auto sk = hkdf(ikm, {}, "PQXDH-v1", 32);
+  auto shared_key = hkdf(ikm, {}, "PQXDH-v1", 32);
 
   OPENSSL_cleanse(ikm.data(), ikm.size());
   OPENSSL_cleanse(dh1.data(), dh1.size());
@@ -107,5 +110,5 @@ pqxdhReceive(const X25519KeyPair &receiverIk, const X25519KeyPair &receiverSpk,
   OPENSSL_cleanse(dh3.data(), dh3.size());
   OPENSSL_cleanse(pqSs.data(), pqSs.size());
 
-  return sk;
+  return shared_key;
 }

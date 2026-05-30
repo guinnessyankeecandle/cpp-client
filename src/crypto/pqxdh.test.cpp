@@ -7,8 +7,8 @@ import securemsg.crypto.mlkem;
 // signingIk = Ed25519 (for signing SPK/PQ prekey)
 // receiverIk = X25519 (for DH)
 static RemoteKeyBundle
-makeBundle(const X25519KeyPair &receiverIk, Ed25519KeyPair &signingIk,
-           X25519KeyPair &spk, MlKemKeyPair &pqKp,
+makeBundle(const X25519KeyPair &receiverIk, const Ed25519KeyPair &signingIk,
+           const X25519KeyPair &spk, const MlKemKeyPair &pqKp,
            std::optional<X25519KeyPair> opk = std::nullopt) {
   RemoteKeyBundle b;
   b.ikEdPub = signingIk.pub;
