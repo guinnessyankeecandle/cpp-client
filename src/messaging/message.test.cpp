@@ -8,7 +8,7 @@ TEST_CASE("Message construction and getters", "[message]") {
   REQUIRE(m.getCiphertext() == "ct");
   REQUIRE(m.getRatchetHeaderEnc() == "hdr");
   REQUIRE(m.getDirection() == Message::Direction::Received);
-  REQUIRE(m.getPlaintext() == "");
+  REQUIRE(m.getPlaintext().empty());
 }
 
 TEST_CASE("Message setPlaintext", "[message]") {
@@ -28,7 +28,7 @@ TEST_CASE("GroupMessage construction and getters", "[message]") {
   REQUIRE(gm.getEpoch() == 2);
   REQUIRE(gm.getUserId() == 42);
   REQUIRE(gm.getCiphertext() == "ct");
-  REQUIRE(gm.getPlaintext() == "");
+  REQUIRE(gm.getPlaintext().empty());
 }
 
 TEST_CASE("GroupMessage setPlaintext", "[message]") {
