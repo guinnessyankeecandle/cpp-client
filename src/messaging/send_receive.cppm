@@ -8,20 +8,11 @@ module;
 #include <unordered_map>
 #include <vector>
 export module securemsg.messaging.send_receive;
-import securemsg.crypto.random;
-import securemsg.crypto.aead;
-import securemsg.crypto.kdf;
-import securemsg.crypto.ed25519;
-import securemsg.crypto.x25519;
-import securemsg.crypto.mlkem;
-import securemsg.crypto.pqxdh;
-import securemsg.crypto.ratchet;
-import securemsg.crypto.keystore;
-import securemsg.crypto.srp;
-import securemsg.network.api;
+import securemsg.crypto;
+import securemsg.network;
 import securemsg.messaging.message;
 import securemsg.messaging.store;
-import securemsg.models.user;
+import securemsg.models;
 
 export using RatchetMap = std::unordered_map<int32_t, RatchetState>;
 // Keyed by groupId → per-sender ratchet: senderId → SenderKeyRatchetState
@@ -59,7 +50,7 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
     if (!bundle.value("one_time_prekey", "").empty())
       opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
-    if (auto it = identityCache.find(recipientId); it != identityCache.end()) {
+    if (const auto it = identityCache.find(recipientId); it != identityCache.end()) {
       if (CRYPTO_memcmp(it->second.identityPub.data(), ikEdPub.data(),
                         ikEdPub.size()) != 0)
         throw std::runtime_error("Identity key mismatch for user " +
@@ -77,7 +68,7 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
   std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto msg = ratchet.encrypt(plaintextBytes);
 
-  auto result =
+  const auto result =
       api.sendMessage(accessToken, recipientId, base64Encode(msg.ciphertext),
                       base64Encode(msg.headerCiphertext));
   return {result.value("id", 0)};
@@ -90,7 +81,7 @@ receiveDirectMessages(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
                       const std::optional<X25519KeyPair> &myOpk,
                       const MlKemKeyPair &myPq,
                       std::unordered_map<int32_t, Identity> & /*identityCache*/,
-                      ApiClient &apiForLookup) {
+                      const ApiClient &apiForLookup) {
 
   auto messages = api.listMessages(accessToken);
   if (!messages.is_array())
@@ -163,7 +154,8 @@ export std::string encryptSkdmForMember(ApiClient &api,
   return base64Encode(payload);
 }
 
-export SendResult sendGroupMessage(ApiClient &api, GroupSenderKeys &senderKeys,
+export SendResult sendGroupMessage(ApiClient &api,
+                                   const GroupSenderKeys &senderKeys,
                                    GroupRatchetMap &groupRatchets,
                                    const std::string &accessToken,
                                    int32_t groupId, int32_t myUserId,
@@ -180,9 +172,9 @@ export SendResult sendGroupMessage(ApiClient &api, GroupSenderKeys &senderKeys,
   const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto wire = ratchet.encrypt(plaintextBytes);
 
-  auto groupInfo = api.getGroup(accessToken, groupId);
+  const auto groupInfo = api.getGroup(accessToken, groupId);
   const int32_t epoch = groupInfo.value("epoch", 0);
-  auto result =
+  const auto result =
       api.sendGroupMessage(accessToken, groupId, epoch, base64Encode(wire));
   return {result.value("id", 0)};
 }
@@ -230,7 +222,7 @@ public:
 
   [[nodiscard]] int32_t resolve(const int32_t groupId,
                                 const int32_t incomingEpoch) const {
-    auto it = m_postedEpoch.find(groupId);
+    const auto it = m_postedEpoch.find(groupId);
     if (it == m_postedEpoch.end())
       return incomingEpoch;
     const int32_t myPosted = it->second;

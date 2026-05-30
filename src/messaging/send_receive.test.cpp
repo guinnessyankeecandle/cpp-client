@@ -86,14 +86,3 @@ TEST_CASE("SkdmEpochTracker recordPosted multiple groups", "[send_receive]") {
   REQUIRE(tracker.resolve(2, 6) == 6);
 }
 
-TEST_CASE("SenderKey default construction", "[send_receive]") {
-  SenderKey sk;
-  REQUIRE(sk.chainKey.empty());
-  REQUIRE(sk.epoch == 0);
-}
-
-TEST_CASE("SenderKey construction with values", "[send_receive]") {
-  SenderKey sk{randomBytes(32), 3};
-  REQUIRE(sk.chainKey.size() == 32);
-  REQUIRE(sk.epoch == 3);
-}

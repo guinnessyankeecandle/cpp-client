@@ -1,4 +1,5 @@
 #include <catch2/catch.hpp>
+#include <variant>
 import securemsg.messaging.store;
 import securemsg.messaging.message;
 

@@ -18,7 +18,8 @@ public:
     return m_ciphertext;
   }
   [[nodiscard]] Direction getDirection() const { return m_direction; }
-  [[nodiscard]] const std::string &getPlaintext() const { return m_plaintext; } // Get a read only plaintext
+  // Returns a read-only reference
+  [[nodiscard]] const std::string &getPlaintext() const { return m_plaintext; }
   void setPlaintext(std::string p) { m_plaintext = std::move(p); }
 
 private:
