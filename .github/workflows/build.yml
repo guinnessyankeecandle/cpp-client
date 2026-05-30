@@ -4,7 +4,7 @@ on:
   push:
 
 jobs:
-  build:
+  debug:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -12,8 +12,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake clang \
-            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \
-            qrencode
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev qrencode
       - name: Configure
         env:
           CC: clang
@@ -21,3 +20,24 @@ jobs:
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -Wno-dev
       - name: Build
         run: cmake --build build -j$(nproc)
+
+  checksec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake checksec clang \
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev
+      - name: Build hardened Release binary
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE" \
+            -DCMAKE_EXE_LINKER_FLAGS="-pie -Wl,-z,relro,-z,now"
+          cmake --build build --target securemsg
+      - name: Run checksec
+        run: checksec --file=build/securemsg --output=cli
