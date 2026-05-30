@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y ninja-build cmake clang
+        run: sudo apt-get install -y ninja-build cmake clang libssl-dev libcurl4-openssl-dev nlohmann-json3-dev
 
       - name: Configure with libFuzzer
         env:

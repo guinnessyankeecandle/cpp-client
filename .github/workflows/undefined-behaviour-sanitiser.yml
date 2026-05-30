@@ -11,8 +11,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake clang \
-            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \
-            qrencode
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev qrencode
       - name: Configure with UBSan
         env:
           CC: clang
