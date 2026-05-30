@@ -50,7 +50,8 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
     if (!bundle.value("one_time_prekey", "").empty())
       opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
-    if (const auto it = identityCache.find(recipientId); it != identityCache.end()) {
+    if (const auto it = identityCache.find(recipientId);
+        it != identityCache.end()) {
       if (CRYPTO_memcmp(it->second.identityPub.data(), ikEdPub.data(),
                         ikEdPub.size()) != 0)
         throw std::runtime_error("Identity key mismatch for user " +

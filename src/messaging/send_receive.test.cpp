@@ -85,4 +85,3 @@ TEST_CASE("SkdmEpochTracker recordPosted multiple groups", "[send_receive]") {
   REQUIRE(tracker.resolve(1, 1) == 1);
   REQUIRE(tracker.resolve(2, 6) == 6);
 }
-
