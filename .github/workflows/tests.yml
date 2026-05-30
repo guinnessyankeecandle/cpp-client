@@ -45,9 +45,9 @@ jobs:
       - name: Build
         run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
       - name: Run
-        run: LLVM_PROFILE_FILE="coverage-%p.profraw" ctest --test-dir build-coverage --output-on-failure
+        run: LLVM_PROFILE_FILE="build-coverage/coverage-%p.profraw" ctest --test-dir build-coverage --output-on-failure
       - name: Merge profiles
-        run: llvm-profdata merge -sparse coverage-*.profraw -o coverage.profdata
+        run: llvm-profdata merge -sparse build-coverage/coverage-*.profraw -o coverage.profdata
       - name: Report coverage
         run: |
           llvm-cov report ./build-coverage/cybersec_tests \
@@ -94,7 +94,7 @@ jobs:
       - name: Run under ${{ matrix.name }}
         env:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
-          LSAN_OPTIONS: "suppressions=$GITHUB_WORKSPACE/lsan.supp"
+          LSAN_OPTIONS: "suppressions=/__w/cpp-client/cpp-client/lsan.supp"
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
           TSAN_OPTIONS: "halt_on_error=1"
         run: ctest --test-dir build --output-on-failure
