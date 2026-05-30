@@ -59,3 +59,41 @@ TEST_CASE("SkdmEpochTracker no prior post: passthrough", "[send_receive]") {
   SkdmEpochTracker tracker;
   REQUIRE(tracker.resolve(99, 7) == 7);
 }
+
+TEST_CASE("SkdmEpochTracker hasPosted returns false before recording",
+          "[send_receive]") {
+  SkdmEpochTracker tracker;
+  REQUIRE_FALSE(tracker.hasPosted(1));
+  REQUIRE_FALSE(tracker.hasPosted(99));
+}
+
+TEST_CASE("SkdmEpochTracker hasPosted returns true after recording",
+          "[send_receive]") {
+  SkdmEpochTracker tracker;
+  tracker.recordPosted(1, 0);
+  REQUIRE(tracker.hasPosted(1));
+  REQUIRE_FALSE(tracker.hasPosted(2));
+}
+
+TEST_CASE("SkdmEpochTracker recordPosted multiple groups", "[send_receive]") {
+  SkdmEpochTracker tracker;
+  tracker.recordPosted(1, 0);
+  tracker.recordPosted(2, 5);
+  REQUIRE(tracker.hasPosted(1));
+  REQUIRE(tracker.hasPosted(2));
+  REQUIRE_FALSE(tracker.hasPosted(3));
+  REQUIRE(tracker.resolve(1, 1) == 1);
+  REQUIRE(tracker.resolve(2, 6) == 6);
+}
+
+TEST_CASE("SenderKey default construction", "[send_receive]") {
+  SenderKey sk;
+  REQUIRE(sk.chainKey.empty());
+  REQUIRE(sk.epoch == 0);
+}
+
+TEST_CASE("SenderKey construction with values", "[send_receive]") {
+  SenderKey sk{randomBytes(32), 3};
+  REQUIRE(sk.chainKey.size() == 32);
+  REQUIRE(sk.epoch == 3);
+}
