@@ -45,9 +45,7 @@ jobs:
       - name: Build
         run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
       - name: Run
-        env:
-          LLVM_PROFILE_FILE: "coverage-%p.profraw"
-        run: ctest --test-dir build-coverage --output-on-failure
+        run: LLVM_PROFILE_FILE="coverage-%p.profraw" ctest --test-dir build-coverage --output-on-failure
       - name: Merge profiles
         run: llvm-profdata merge -sparse coverage-*.profraw -o coverage.profdata
       - name: Report coverage
