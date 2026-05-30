@@ -1,0 +1,3 @@
+# Suppress OpenSSL's internal allocator — it intentionally does not free
+# all its allocations (e.g. algorithm registration, OID tables).
+leak:CRYPTO_malloc
