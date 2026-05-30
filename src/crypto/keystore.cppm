@@ -1,6 +1,8 @@
 module;
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <openssl/crypto.h>
 #include <stdexcept>
@@ -42,8 +44,8 @@ export KeyBundle keystoreGenerate() {
 export void keystoreSave(const std::string &path, const KeyBundle &kb,
                          const std::string &password) {
   std::vector<uint8_t> payload;
-  auto append = [&](const std::vector<uint8_t> &v) {
-    payload.insert(payload.end(), v.begin(), v.end());
+  const auto append = [&](const std::vector<uint8_t> &v) {
+    std::ranges::copy(v, std::back_inserter(payload));
   };
   append(kb.ik.priv);
   append(kb.ik.pub);
@@ -54,9 +56,7 @@ export void keystoreSave(const std::string &path, const KeyBundle &kb,
   append(kb.pq.pub);
   append(kb.pqSig);
 
-  uint32_t opkCount = static_cast<uint32_t>(kb.opks.size());
-  for (int i = 3; i >= 0; --i)
-    payload.push_back((opkCount >> (i * 8)) & 0xFF);
+  payload.push_back(static_cast<uint8_t>(kb.opks.size()));
   for (const auto &opk : kb.opks) {
     append(opk.priv);
     append(opk.pub);
@@ -65,41 +65,52 @@ export void keystoreSave(const std::string &path, const KeyBundle &kb,
   auto salt = randomBytes(PBKDF2_SALT_BYTES);
   auto encKey = pbkdf2(password, salt, KEY_BYTES);
   auto pkt = aeadEncrypt(payload, encKey);
+
+  // Clear sensitive data from memory
   OPENSSL_cleanse(encKey.data(), encKey.size());
   OPENSSL_cleanse(payload.data(), payload.size());
 
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f)
-    throw std::runtime_error("Cannot open key file for writing: " + path);
-  f.write(reinterpret_cast<const char *>(salt.data()), PBKDF2_SALT_BYTES);
-  auto packed = packAead(pkt);
-  f.write(reinterpret_cast<const char *>(packed.data()),
-          static_cast<std::streamsize>(packed.size()));
+  // Write to a temp file first — if anything fails the original is untouched
+  const std::string tmpPath = path + ".tmp";
+  {
+    std::ofstream key_file(tmpPath, std::ios::binary | std::ios::trunc);
+    if (!key_file)
+      throw std::runtime_error("Cannot open key file for writing: " + tmpPath);
+    const auto packed = packAead(pkt);
+    key_file.write(reinterpret_cast<const char *>(salt.data()),
+                   PBKDF2_SALT_BYTES);
+    key_file.write(reinterpret_cast<const char *>(packed.data()),
+                   static_cast<std::streamsize>(packed.size()));
+  }
+  // Atomic replace — rename is atomic on POSIX when src/dst are on same fs
+  std::filesystem::rename(tmpPath, path);
 }
 
 export KeyBundle keystoreLoad(const std::string &path,
                               const std::string &password) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f)
+  std::ifstream key_file(path, std::ios::binary);
+  if (!key_file)
     throw std::runtime_error("Key file not found: " + path);
 
   std::array<uint8_t, PBKDF2_SALT_BYTES> salt{};
-  f.read(reinterpret_cast<char *>(salt.data()), PBKDF2_SALT_BYTES);
+  key_file.read(reinterpret_cast<char *>(salt.data()), PBKDF2_SALT_BYTES);
 
-  std::vector<uint8_t> rest((std::istreambuf_iterator<char>(f)),
+  std::vector<uint8_t> rest((std::istreambuf_iterator(key_file)),
                             std::istreambuf_iterator<char>());
 
   auto encKey = pbkdf2(password, {salt.begin(), salt.end()}, KEY_BYTES);
   auto pkt = unpackAead(rest);
   auto payload = aeadDecrypt(pkt, encKey);
+
+  // clean memory
   OPENSSL_cleanse(encKey.data(), encKey.size());
 
   std::size_t off = 0;
-  auto read = [&](std::size_t n) {
-    if (off + n > payload.size())
+  auto read = [&](const std::size_t numBytes) {
+    if (off + numBytes > payload.size())
       throw std::runtime_error("Key file truncated");
-    std::vector<uint8_t> v(payload.begin() + off, payload.begin() + off + n);
-    off += n;
+    std::vector v(payload.begin() + off, payload.begin() + off + numBytes);
+    off += numBytes;
     return v;
   };
 
@@ -109,25 +120,20 @@ export KeyBundle keystoreLoad(const std::string &path,
   kb.spk.priv = read(32);
   kb.spk.pub = read(32);
   kb.spkSig = read(64);
-
-  // ML-KEM-1024 FIPS 203: decapsulation key 3168 bytes, encapsulation key 1568
-  // bytes
   kb.pq.priv = read(3168);
   kb.pq.pub = read(1568);
   kb.pqSig = read(64);
 
-  uint32_t opkCount = 0;
-  auto countBytes = read(4);
-  for (int i = 0; i < 4; ++i)
-    opkCount = (opkCount << 8) | countBytes[i];
+  const uint8_t opkCount = read(1)[0];
   kb.opks.reserve(opkCount);
-  for (uint32_t i = 0; i < opkCount; ++i) {
+  for (uint8_t i = 0; i < opkCount; ++i) {
     X25519KeyPair opk;
     opk.priv = read(32);
     opk.pub = read(32);
     kb.opks.push_back(std::move(opk));
   }
 
+  // clear sensitive memory
   OPENSSL_cleanse(payload.data(), payload.size());
   return kb;
 }
