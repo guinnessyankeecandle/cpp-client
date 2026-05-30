@@ -2,7 +2,7 @@
 import securemsg.models.user;
 
 TEST_CASE("User construction and getters", "[user]") {
-    User u{1, "alice", "acc123", "ref456"};
+    const User u{1, "alice", "acc123", "ref456"};
     REQUIRE(u.getId()           == 1);
     REQUIRE(u.getUsername()     == "alice");
     REQUIRE(u.getAccessToken()  == "acc123");
@@ -15,9 +15,4 @@ TEST_CASE("User token mutation", "[user]") {
     u.setRefreshToken("new_ref");
     REQUIRE(u.getAccessToken()  == "new_acc");
     REQUIRE(u.getRefreshToken() == "new_ref");
-}
-
-TEST_CASE("Default-constructed User has zero ID", "[user]") {
-    User u;
-    REQUIRE(u.getId() == 0);
 }

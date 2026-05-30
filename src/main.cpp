@@ -332,11 +332,16 @@ static void startPolling(AppState& state, ScreenInteractive& scr, ApiClient& api
                     auto groupsJson = api.listGroups(state.accessToken);
                     if (groupsJson.contains("groups")) {
                         state.groups.clear();
-                        for (const auto& g : groupsJson["groups"])
-                            state.groups.push_back({
+                        for (const auto& g : groupsJson["groups"]) {
+                            std::vector<int32_t> members;
+                            if (g.contains("members"))
+                                for (const auto& m : g["members"])
+                                    members.emplace_back(m.get<int32_t>());
+                            state.groups.emplace_back(
                                 g.value("id", 0), g.value("name", ""),
-                                0, {}, g.value("epoch", 0)
-                            });
+                                std::move(members), g.value("epoch", 0)
+                            );
+                        }
                     }
                 }
                 scr.PostEvent(Event::Custom);
