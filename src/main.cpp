@@ -445,13 +445,14 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       if (!state.localUser)
         return;
       if (!state.viewingGroup && state.selectedContactId >= 0) {
-        sendDirectMessage(
-            api, state.ratchets, state.localUser->getAccessToken(),
-            state.selectedContactId, state.composeText,
-            state.localUser->getKeyBundle().spk, state.contactCache);
+        sendDirectMessage(api, state.ratchets, state.messageStore,
+                          state.localUser->getAccessToken(),
+                          state.selectedContactId, state.composeText,
+                          state.localUser->getKeyBundle().spk,
+                          state.contactCache);
       } else if (state.viewingGroup && state.selectedGroupId >= 0) {
         sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
-                         state.localUser->getAccessToken(),
+                         state.messageStore, state.localUser->getAccessToken(),
                          state.selectedGroupId, state.localUser->getId(),
                          state.composeText);
       }

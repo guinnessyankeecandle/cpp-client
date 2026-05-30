@@ -24,31 +24,32 @@ export using GroupSenderKeys =
     std::unordered_map<int32_t, std::vector<uint8_t>>;
 
 export struct SendResult {
-  int32_t messageId{0};
+  int32_t messageId;
 };
 
-// ── Direct messaging
-// ──────────────────────────────────────────────────────────
+// Direct messaging
 
-export SendResult sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
-                                    const std::string &accessToken,
-                                    int32_t recipientId,
-                                    const std::string &plaintext,
-                                    const X25519KeyPair &senderIk,
-                                    const std::vector<Contact> &contactCache) {
+export SendResult
+sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
+                  const std::string &accessToken, int32_t recipientId,
+                  const std::string &plaintext, const X25519KeyPair &senderIk,
+                  const std::vector<Contact> &contactCache) {
 
   if (!ratchets.contains(recipientId)) {
     auto bundle = api.getKeyBundle(accessToken, recipientId);
 
-    auto ikEdPub = base64Decode(bundle.value("identity_pub", ""));
-    auto ikXPub = base64Decode(bundle.value("identity_x_pub", ""));
-    auto spkPub = base64Decode(bundle.value("signed_prekey_pub", ""));
-    auto spkSig = base64Decode(bundle.value("signed_prekey_sig", ""));
-    auto pqPub = base64Decode(bundle.value("pq_prekey_pub", ""));
-    auto pqSig = base64Decode(bundle.value("pq_prekey_sig", ""));
+    auto ikEdPub = base64Decode(bundle.at("identity_pub").get<std::string>());
+    auto ikXPub = base64Decode(bundle.at("identity_x_pub").get<std::string>());
+    auto spkPub =
+        base64Decode(bundle.at("signed_prekey_pub").get<std::string>());
+    auto spkSig =
+        base64Decode(bundle.at("signed_prekey_sig").get<std::string>());
+    auto pqPub = base64Decode(bundle.at("pq_prekey_pub").get<std::string>());
+    auto pqSig = base64Decode(bundle.at("pq_prekey_sig").get<std::string>());
 
     std::optional<std::vector<uint8_t>> opkPub;
-    if (!bundle.value("one_time_prekey", "").empty())
+    if (bundle.contains("one_time_prekey") &&
+        !bundle["one_time_prekey"].is_null())
       opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
     if (const auto it = std::ranges::find_if(
@@ -75,7 +76,13 @@ export SendResult sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
   const auto result =
       api.sendMessage(accessToken, recipientId, base64Encode(msg.ciphertext),
                       base64Encode(msg.headerCiphertext));
-  return {result.value("id", 0)};
+  const int32_t msgId = result.value("id", 0);
+  Message sent{msgId, recipientId, base64Encode(msg.ciphertext),
+               base64Encode(msg.headerCiphertext),
+               BaseMessage::Direction::Sent};
+  sent.setPlaintext(plaintext);
+  store.add(std::move(sent));
+  return {msgId};
 }
 
 export void receiveDirectMessages(
@@ -128,14 +135,15 @@ export std::string encryptSkdmForMember(ApiClient &api,
                                         const X25519KeyPair &senderIk,
                                         const std::vector<uint8_t> &senderKey) {
   auto bundle = api.getKeyBundle(accessToken, memberId);
-  auto ikEdPub = base64Decode(bundle.value("identity_pub", ""));
-  auto ikXPub = base64Decode(bundle.value("identity_x_pub", ""));
-  auto spkPub = base64Decode(bundle.value("signed_prekey_pub", ""));
-  auto spkSig = base64Decode(bundle.value("signed_prekey_sig", ""));
-  auto pqPub = base64Decode(bundle.value("pq_prekey_pub", ""));
-  auto pqSig = base64Decode(bundle.value("pq_prekey_sig", ""));
+  auto ikEdPub = base64Decode(bundle.at("identity_pub").get<std::string>());
+  auto ikXPub = base64Decode(bundle.at("identity_x_pub").get<std::string>());
+  auto spkPub = base64Decode(bundle.at("signed_prekey_pub").get<std::string>());
+  auto spkSig = base64Decode(bundle.at("signed_prekey_sig").get<std::string>());
+  auto pqPub = base64Decode(bundle.at("pq_prekey_pub").get<std::string>());
+  auto pqSig = base64Decode(bundle.at("pq_prekey_sig").get<std::string>());
   std::optional<std::vector<uint8_t>> opkPub;
-  if (!bundle.value("one_time_prekey", "").empty())
+  if (bundle.contains("one_time_prekey") &&
+      !bundle["one_time_prekey"].is_null())
     opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
   RemoteKeyBundle remote{ikEdPub, ikXPub, spkPub, spkSig, opkPub, pqPub, pqSig};
@@ -156,12 +164,11 @@ export std::string encryptSkdmForMember(ApiClient &api,
   return base64Encode(payload);
 }
 
-export SendResult sendGroupMessage(ApiClient &api,
-                                   const GroupSenderKeys &senderKeys,
-                                   GroupRatchetMap &groupRatchets,
-                                   const std::string &accessToken,
-                                   int32_t groupId, int32_t myUserId,
-                                   const std::string &plaintext) {
+export SendResult
+sendGroupMessage(ApiClient &api, const GroupSenderKeys &senderKeys,
+                 GroupRatchetMap &groupRatchets, MessageStore &store,
+                 const std::string &accessToken, int32_t groupId,
+                 int32_t myUserId, const std::string &plaintext) {
   if (!senderKeys.contains(groupId))
     throw std::runtime_error("No sender key for group " +
                              std::to_string(groupId));
@@ -178,7 +185,16 @@ export SendResult sendGroupMessage(ApiClient &api,
   const int32_t epoch = groupInfo.value("epoch", 0);
   const auto result =
       api.sendGroupMessage(accessToken, groupId, epoch, base64Encode(wire));
-  return {result.value("id", 0)};
+  const int32_t msgId = result.value("id", 0);
+  GroupMessage sent{msgId,
+                    groupId,
+                    epoch,
+                    myUserId,
+                    base64Encode(wire),
+                    BaseMessage::Direction::Sent};
+  sent.setPlaintext(plaintext);
+  store.add(std::move(sent));
+  return {msgId};
 }
 
 export void receiveGroupMessages(ApiClient &api, GroupRatchetMap &groupRatchets,
@@ -204,8 +220,12 @@ export void receiveGroupMessages(ApiClient &api, GroupRatchetMap &groupRatchets,
       auto &ratchet = groupRatchets.at(groupId).at(senderId);
       auto wire = base64Decode(m.value("ciphertext", ""));
       auto plain = ratchet.decrypt(wire);
-      GroupMessage msg{id, groupId, m.value("epoch", 0), senderId,
-                       m.value("ciphertext", "")};
+      GroupMessage msg{id,
+                       groupId,
+                       m.value("epoch", 0),
+                       senderId,
+                       m.value("ciphertext", ""),
+                       BaseMessage::Direction::Received};
       msg.setPlaintext(std::string(plain.begin(), plain.end()));
       store.add(std::move(msg));
     } catch (...) {

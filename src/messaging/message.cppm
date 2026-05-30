@@ -46,8 +46,9 @@ private:
 export class GroupMessage : public BaseMessage {
 public:
   GroupMessage(const int32_t id, const int32_t groupId, const int32_t epoch,
-               const int32_t senderId, std::string ciphertext)
-      : BaseMessage(id, senderId, std::move(ciphertext), Direction::Received),
+               const int32_t senderId, std::string ciphertext,
+               const Direction dir)
+      : BaseMessage(id, senderId, std::move(ciphertext), dir),
         m_groupId(groupId), m_epoch(epoch) {}
 
   [[nodiscard]] int32_t getGroupId() const { return m_groupId; }

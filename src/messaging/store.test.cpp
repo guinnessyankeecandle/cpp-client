@@ -7,7 +7,7 @@ static Message makeMsg(const int32_t id, const int32_t userId = 1) {
 }
 
 static GroupMessage makeGrpMsg(const int32_t id, const int32_t groupId = 10) {
-  return {id, groupId, 0, 2, "ct"};
+  return {id, groupId, 0, 2, "ct", BaseMessage::Direction::Received};
 }
 
 TEST_CASE("MessageStore add direct and retrieve by user", "[store]") {
