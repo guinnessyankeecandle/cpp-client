@@ -334,9 +334,11 @@ static void startPolling(AppState& state, ScreenInteractive& scr, ApiClient& api
                         state.groups.clear();
                         for (const auto& g : groupsJson["groups"]) {
                             std::vector<int32_t> members;
-                            if (g.contains("members"))
-                                for (const auto& m : g["members"])
-                                    members.emplace_back(m.get<int32_t>());
+                            if (g.contains("members")) {
+                                const auto& arr = g["members"];
+                                std::ranges::transform(arr, std::back_inserter(members),
+                                    [](const auto& m){ return m.template get<int32_t>(); });
+                            }
                             state.groups.emplace_back(
                                 g.value("id", 0), g.value("name", ""),
                                 std::move(members), g.value("epoch", 0)
@@ -392,13 +394,14 @@ Component makeMainScreen(AppState& state, ScreenInteractive& scr, ApiClient& api
 
     auto rebuildLabels = [&] {
         allLabels->clear();
-        for (const auto& u : state.contacts) {
-            const bool ver = state.identityCache.contains(u.getId())
-                    && state.identityCache.at(u.getId()).verified;
-            allLabels->push_back(std::string(ver ? "v " : "  ") + u.getUsername());
-        }
-        for (const auto& g : state.groups)
-            allLabels->push_back("  " + g.getName());
+        std::ranges::transform(state.contacts, std::back_inserter(*allLabels),
+            [&](const auto& u) {
+                const bool ver = state.identityCache.contains(u.getId())
+                        && state.identityCache.at(u.getId()).verified;
+                return std::string(ver ? "v " : "  ") + u.getUsername();
+            });
+        std::ranges::transform(state.groups, std::back_inserter(*allLabels),
+            [](const auto& g) { return "  " + g.getName(); });
     };
     rebuildLabels();
 

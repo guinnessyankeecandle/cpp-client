@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y ninja-build cmake checksec clang
+        run: sudo apt-get install -y ninja-build cmake checksec clang libssl-dev libcurl4-openssl-dev nlohmann-json3-dev
 
       - name: Build hardened Release binary
         env:
@@ -21,7 +21,7 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE" \
             -DCMAKE_EXE_LINKER_FLAGS="-pie -Wl,-z,relro,-z,now"
-          cmake --build build --target cybersec_epic
+          cmake --build build --target securemsg
 
       - name: Run checksec
-        run: checksec --file=build/src/cybersec_epic --output=cli
+        run: checksec --file=build/securemsg --output=cli
