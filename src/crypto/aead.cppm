@@ -1,7 +1,9 @@
 module;
+#include <algorithm>
 #include <cstdint>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <ranges>
 #include <stdexcept>
 #include <vector>
 export module securemsg.crypto.aead;
@@ -17,12 +19,16 @@ export constexpr int IV_BYTES = 12;
 export constexpr int TAG_BYTES = 16;
 export constexpr int KEY_BYTES = 32;
 
+using CipherCtxPtr = OsslHandle<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
+
 export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
                               const std::vector<uint8_t> &key) {
-  using CipherCtxPtr = OsslHandle<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
+  if (key.size() != KEY_BYTES)
+    throw std::runtime_error("aeadEncrypt: invalid key size");
 
   AeadPacket packet;
-  // Random defensive in case 2 messages share the same key (shouldn't happen with double rachet)
+  // Random defensive in case 2 messages share the same key
+  // (shouldn't happen with double rachet)
   packet.iv = randomBytes(IV_BYTES);
   packet.tag.resize(TAG_BYTES);
   packet.ciphertext.resize(plaintext.size());
@@ -31,12 +37,9 @@ export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
   if (!ctx)
     throw std::runtime_error("EVP_CIPHER_CTX_new failed");
 
-  sslAssert(EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr,
-                               nullptr),
+  sslAssert(EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr,
+                               key.data(), packet.iv.data()),
             "EncryptInit");
-  sslAssert(EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(),
-                               packet.iv.data()),
-            "EncryptInit key/iv");
 
   int outLen = 0;
   if (!plaintext.empty())
@@ -45,9 +48,12 @@ export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
                                 static_cast<int>(plaintext.size())),
               "EncryptUpdate");
 
-  sslAssert(
-      EVP_EncryptFinal_ex(ctx.get(), packet.ciphertext.data() + outLen, &outLen),
-      "EncryptFinal");
+  // Finalize encryption, write everything
+  sslAssert(EVP_EncryptFinal_ex(ctx.get(), packet.ciphertext.data() + outLen,
+                                &outLen),
+            "EncryptFinal");
+
+  // Get the tag (authentication)
   sslAssert(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, TAG_BYTES,
                                 packet.tag.data()),
             "GetTag");
@@ -56,7 +62,8 @@ export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
 
 export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
                                         const std::vector<uint8_t> &key) {
-  using CipherCtxPtr = OsslHandle<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
+  if (key.size() != KEY_BYTES)
+    throw std::runtime_error("aeadDecrypt: invalid key size");
 
   if (static_cast<int>(pkt.iv.size()) != IV_BYTES ||
       static_cast<int>(pkt.tag.size()) != TAG_BYTES)
@@ -66,13 +73,12 @@ export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
   if (!ctx)
     throw std::runtime_error("EVP_CIPHER_CTX_new failed");
 
-  sslAssert(EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr,
-                               nullptr),
+  // Setup decryption
+  sslAssert(EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr,
+                               key.data(), pkt.iv.data()),
             "DecryptInit");
-  sslAssert(EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(),
-                               pkt.iv.data()),
-            "DecryptInit key/iv");
 
+  // Create output plaintext
   std::vector<uint8_t> plain(pkt.ciphertext.size());
   int outLen = 0;
   if (!pkt.ciphertext.empty())
@@ -81,6 +87,7 @@ export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
                                 static_cast<int>(pkt.ciphertext.size())),
               "DecryptUpdate");
 
+  // Sets tag size and what to verify the tag against
   sslAssert(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, TAG_BYTES,
                                 const_cast<uint8_t *>(pkt.tag.data())),
             "SetTag");
@@ -94,14 +101,14 @@ export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
 export std::vector<uint8_t> packAead(const AeadPacket &pkt) {
   std::vector<uint8_t> out;
   out.reserve(IV_BYTES + TAG_BYTES + pkt.ciphertext.size());
-  out.insert(out.end(), pkt.iv.begin(), pkt.iv.end());
-  out.insert(out.end(), pkt.tag.begin(), pkt.tag.end());
-  out.insert(out.end(), pkt.ciphertext.begin(), pkt.ciphertext.end());
+  std::ranges::copy(pkt.iv, std::back_inserter(out));
+  std::ranges::copy(pkt.tag, std::back_inserter(out));
+  std::ranges::copy(pkt.ciphertext, std::back_inserter(out));
   return out;
 }
 
 export AeadPacket unpackAead(const std::vector<uint8_t> &raw) {
-  if (raw.size() < static_cast<size_t>(IV_BYTES + TAG_BYTES))
+  if (raw.size() < static_cast<std::size_t>(IV_BYTES + TAG_BYTES))
     throw std::runtime_error("AEAD packet too short");
   AeadPacket pkt;
   pkt.iv.assign(raw.begin(), raw.begin() + IV_BYTES);
