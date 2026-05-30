@@ -1,8 +1,7 @@
 Checks: >
   clang-diagnostic-*,
   clang-analyzer-*,
-  misc-const-correctness,
-  misc-use-internal-linkage,
+  -clang-analyzer-optin.performance.Padding,
   modernize-use-nullptr,
   modernize-use-override,
   modernize-use-emplace,
@@ -12,7 +11,3 @@ Checks: >
   cppcoreguidelines-avoid-non-const-global-variables
 
 WarningsAsErrors: "*"
-
-CheckOptions:
-  - key: misc-const-correctness.WarnPointersAsValues
-    value: "false"

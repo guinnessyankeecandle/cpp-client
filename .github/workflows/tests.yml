@@ -7,6 +7,7 @@ env:
   OPENSSL_VERSION: "3.4.1"
   OPENSSL_ROOT: "/usr/local"
   OPENSSL_RPATH: "/usr/local/lib64"
+  LD_LIBRARY_PATH: "/usr/local/lib64"
 
 jobs:
   test:
@@ -84,7 +85,7 @@ jobs:
             cxx_flags: "-fsanitize=address -fno-omit-frame-pointer"
             linker_flags: "-fsanitize=address"
             env_var: ASAN_OPTIONS
-            env_val: "halt_on_error=1:detect_leaks=1:suppressions=lsan.supp"
+            env_val: "halt_on_error=1:detect_leaks=1:suppressions=${{ github.workspace }}/lsan.supp"
           - name: UBSan
             cxx_flags: "-fsanitize=undefined -fno-omit-frame-pointer"
             linker_flags: "-fsanitize=undefined"

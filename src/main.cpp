@@ -124,8 +124,8 @@ Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
 Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
                              ApiClient &api) {
   auto rUser = Input(&state.regUsername, "username");
-  auto rPass =
-      Input(&state.regPassword, "password", InputOption{.password = true});
+  auto rPass = Input(&state.regPassword, "password",
+                     InputOption{.password = true, .transform = {}});
   auto tCode = Input(&state.regTotpCode, "6-digit code");
 
   auto btnSubmit = Button(" Register ", [&] {
@@ -244,8 +244,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
 Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
                           ApiClient &api) {
   auto lUser = Input(&state.loginUsername, "username");
-  auto lPass =
-      Input(&state.loginPassword, "password", InputOption{.password = true});
+  auto lPass = Input(&state.loginPassword, "password",
+                     InputOption{.password = true, .transform = {}});
   auto tCode = Input(&state.loginTotpCode, "6-digit code");
 
   auto btnLogin = Button(" Login ", [&] {

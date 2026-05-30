@@ -77,10 +77,10 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
 export void
 receiveDirectMessages(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
                       const std::string &accessToken, int32_t myUserId,
-                      const X25519KeyPair &mySpk,
+                      const X25519KeyPair & /*mySpk*/,
                       const std::optional<X25519KeyPair> &myOpk,
                       const MlKemKeyPair &myPq,
-                      std::unordered_map<int32_t, Identity> &identityCache,
+                      std::unordered_map<int32_t, Identity> & /*identityCache*/,
                       ApiClient &apiForLookup) {
 
   auto messages = api.listMessages(accessToken);
