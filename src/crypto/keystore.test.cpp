@@ -42,17 +42,3 @@ TEST_CASE("keystoreLoad wrong password throws", "[keystore]") {
   REQUIRE_THROWS_AS(keystoreLoad(path, "wrongpassword"), std::runtime_error);
   std::filesystem::remove(path);
 }
-
-TEST_CASE("identityCache save-load roundtrip", "[keystore]") {
-  std::unordered_map<int32_t, Identity> cache;
-  cache[1] = {"alice", {0x01, 0x02, 0x03}, true};
-  cache[2] = {"bob", {0x04, 0x05, 0x06}, false};
-  std::string path = "/tmp/test_identity_cache.json";
-  identityCacheSave(path, cache);
-  auto loaded = identityCacheLoad(path);
-  REQUIRE(loaded[1].username == "alice");
-  REQUIRE(loaded[1].verified == true);
-  REQUIRE(loaded[2].username == "bob");
-  REQUIRE(loaded[2].verified == false);
-  std::filesystem::remove(path);
-}

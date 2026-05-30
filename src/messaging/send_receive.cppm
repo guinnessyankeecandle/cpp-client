@@ -34,7 +34,7 @@ export SendResult
 sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
                   const std::string &accessToken, int32_t recipientId,
                   const std::string &plaintext, const X25519KeyPair &senderIk,
-                  const std::unordered_map<int32_t, Identity> &identityCache) {
+                  const std::unordered_map<int32_t, Contact> &contactCache) {
 
   if (!ratchets.contains(recipientId)) {
     auto bundle = api.getKeyBundle(accessToken, recipientId);
@@ -50,9 +50,9 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
     if (!bundle.value("one_time_prekey", "").empty())
       opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
-    if (const auto it = identityCache.find(recipientId);
-        it != identityCache.end()) {
-      if (CRYPTO_memcmp(it->second.identityPub.data(), ikEdPub.data(),
+    if (const auto it = contactCache.find(recipientId);
+        it != contactCache.end()) {
+      if (CRYPTO_memcmp(it->second.getIdentityPub().data(), ikEdPub.data(),
                         ikEdPub.size()) != 0)
         throw std::runtime_error("Identity key mismatch for user " +
                                  std::to_string(recipientId));
@@ -81,7 +81,7 @@ receiveDirectMessages(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
                       const X25519KeyPair & /*mySpk*/,
                       const std::optional<X25519KeyPair> &myOpk,
                       const MlKemKeyPair &myPq,
-                      std::unordered_map<int32_t, Identity> & /*identityCache*/,
+                      std::unordered_map<int32_t, Contact> & /*contactCache*/,
                       const ApiClient &apiForLookup) {
 
   auto messages = api.listMessages(accessToken);

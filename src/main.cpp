@@ -32,16 +32,14 @@ struct AppState {
   bool loginShowTotp{false};
   std::string loginPreAuthToken, loginTotpCode, loginTotpStatus;
 
-  std::string accessToken, refreshToken;
-  int32_t myUserId{0};
+  std::optional<LocalUser> localUser;
 
-  KeyBundle keyBundle;
-  std::unordered_map<int32_t, Identity> identityCache;
   RatchetMap ratchets;
   GroupRatchetMap groupRatchets;
   GroupSenderKeys groupSenderKeys;
 
-  std::vector<User> contacts;
+  std::unordered_map<int32_t, Contact> contactCache;
+  std::vector<Contact> contacts;
   std::vector<Group> groups;
   int32_t selectedContactId{-1};
   int32_t selectedGroupId{-1};
@@ -169,22 +167,20 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
       }
       auto tokens = api.verify2FA(verify["pre_auth_token"].get<std::string>(),
                                   state.regTotpCode);
-      state.accessToken = tokens["access_token"].get<std::string>();
-      state.refreshToken = tokens["refresh_token"].get<std::string>();
-      state.myUserId = tokens.value("user_id", 0);
-
-      state.keyBundle = keystoreGenerate();
-      keystoreSave("identity.key", state.keyBundle, state.regPassword);
+      state.localUser.emplace(tokens.value("user_id", 0), state.regUsername,
+                              tokens["access_token"].get<std::string>(),
+                              tokens["refresh_token"].get<std::string>());
+      state.localUser->generateKeys();
+      state.localUser->saveKeys("identity.key", state.regPassword);
       std::vector<std::string> opkPubs;
       std::ranges::transform(
-          state.keyBundle.opks, std::back_inserter(opkPubs),
+          state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
           [](const X25519KeyPair &k) { return base64Encode(k.pub); });
-      api.publishKeyBundle(state.accessToken,
-                           base64Encode(state.keyBundle.ik.pub),
-                           base64Encode(state.keyBundle.spk.pub),
-                           base64Encode(state.keyBundle.spkSig), opkPubs,
-                           base64Encode(state.keyBundle.pq.pub),
-                           base64Encode(state.keyBundle.pqSig));
+      const auto &kb = state.localUser->getKeyBundle();
+      api.publishKeyBundle(state.localUser->getAccessToken(),
+                           base64Encode(kb.ik.pub), base64Encode(kb.spk.pub),
+                           base64Encode(kb.spkSig), opkPubs,
+                           base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
 
       state.screen = AppScreen::Main;
       scr.PostEvent(Event::Custom);
@@ -283,40 +279,39 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
     }
     try {
       auto tokens = api.verify2FA(state.loginPreAuthToken, state.loginTotpCode);
-      state.accessToken = tokens["access_token"].get<std::string>();
-      state.refreshToken = tokens["refresh_token"].get<std::string>();
-      state.myUserId = tokens.value("user_id", 0);
-
+      state.localUser.emplace(tokens.value("user_id", 0), state.loginUsername,
+                              tokens["access_token"].get<std::string>(),
+                              tokens["refresh_token"].get<std::string>());
       if (std::filesystem::exists("identity.key")) {
-        state.keyBundle = keystoreLoad("identity.key", state.loginPassword);
+        state.localUser->loadKeys("identity.key", state.loginPassword);
       } else {
-        state.keyBundle = keystoreGenerate();
-        keystoreSave("identity.key", state.keyBundle, state.loginPassword);
+        state.localUser->generateKeys();
+        state.localUser->saveKeys("identity.key", state.loginPassword);
         std::vector<std::string> opkPubs;
         std::ranges::transform(
-            state.keyBundle.opks, std::back_inserter(opkPubs),
+            state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
             [](const X25519KeyPair &k) { return base64Encode(k.pub); });
-        api.publishKeyBundle(state.accessToken,
-                             base64Encode(state.keyBundle.ik.pub),
-                             base64Encode(state.keyBundle.spk.pub),
-                             base64Encode(state.keyBundle.spkSig), opkPubs,
-                             base64Encode(state.keyBundle.pq.pub),
-                             base64Encode(state.keyBundle.pqSig));
+        const auto &kb = state.localUser->getKeyBundle();
+        api.publishKeyBundle(state.localUser->getAccessToken(),
+                             base64Encode(kb.ik.pub), base64Encode(kb.spk.pub),
+                             base64Encode(kb.spkSig), opkPubs,
+                             base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
       }
 
-      const auto countRes = api.getPrekeysCount(state.accessToken);
+      const auto countRes =
+          api.getPrekeysCount(state.localUser->getAccessToken());
       if (countRes.value("count", 0) < 10) {
         std::vector<std::string> newOpkPubs;
-        for (int i = 0; i < 20; ++i) {
+        for (const int i = 0; i < 20; ++i) {
           auto kp = x25519Generate();
           newOpkPubs.push_back(base64Encode(kp.pub));
-          state.keyBundle.opks.push_back(std::move(kp));
+          state.localUser->getKeyBundle().opks.push_back(std::move(kp));
         }
-        api.uploadPrekeys(state.accessToken, newOpkPubs);
-        keystoreSave("identity.key", state.keyBundle, state.loginPassword);
+        api.uploadPrekeys(state.localUser->getAccessToken(), newOpkPubs);
+        state.localUser->saveKeys("identity.key", state.loginPassword);
       }
 
-      state.identityCache = identityCacheLoad("known_identities.json");
+      state.contactCache = contactCacheLoad("known_identities.json");
       state.screen = AppScreen::Main;
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
@@ -376,22 +371,25 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
       if (!state.pollActive)
         break;
       try {
+        if (!state.localUser)
+          continue;
+        const auto &lu = *state.localUser;
         if (state.selectedContactId >= 0 && !state.viewingGroup) {
           receiveDirectMessages(
-              api, state.ratchets, state.messageStore, state.accessToken,
-              state.myUserId, state.keyBundle.spk,
-              state.keyBundle.opks.empty()
+              api, state.ratchets, state.messageStore, lu.getAccessToken(),
+              lu.getId(), lu.getKeyBundle().spk,
+              lu.getKeyBundle().opks.empty()
                   ? std::nullopt
-                  : std::make_optional(state.keyBundle.opks.front()),
-              state.keyBundle.pq, state.identityCache, api);
+                  : std::make_optional(lu.getKeyBundle().opks.front()),
+              lu.getKeyBundle().pq, state.contactCache, api);
         } else if (state.viewingGroup && state.selectedGroupId >= 0) {
           receiveGroupMessages(api, state.groupRatchets, state.messageStore,
-                               state.accessToken, state.selectedGroupId,
-                               state.myUserId);
+                               lu.getAccessToken(), state.selectedGroupId,
+                               lu.getId());
         }
         if (++contactTick >= 6) {
           contactTick = 0;
-          auto groupsJson = api.listGroups(state.accessToken);
+          auto groupsJson = api.listGroups(lu.getAccessToken());
           if (groupsJson.contains("groups")) {
             state.groups.clear();
             for (const auto &g : groupsJson["groups"]) {
@@ -425,12 +423,12 @@ static void openIdentityOverlay(AppState &state) {
   const int32_t targetId = state.viewingGroup ? -1 : state.selectedContactId;
   if (targetId < 0)
     return;
-  const auto it = state.identityCache.find(targetId);
-  if (it == state.identityCache.end())
+  const auto it = state.contactCache.find(targetId);
+  if (it == state.contactCache.end())
     return;
-  state.overlayTargetName = it->second.username;
-  state.overlayKeyB64 = base64Encode(it->second.identityPub);
-  state.overlayVerified = it->second.verified;
+  state.overlayTargetName = it->second.getUsername();
+  state.overlayKeyB64 = base64Encode(it->second.getIdentityPub());
+  state.overlayVerified = it->second.isVerified();
   state.showIdentityOverlay = true;
 }
 
@@ -448,14 +446,18 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     if (state.composeText.empty())
       return;
     try {
+      if (!state.localUser)
+        return;
       if (!state.viewingGroup && state.selectedContactId >= 0) {
-        sendDirectMessage(api, state.ratchets, state.accessToken,
-                          state.selectedContactId, state.composeText,
-                          state.keyBundle.spk, state.identityCache);
+        sendDirectMessage(
+            api, state.ratchets, state.localUser->getAccessToken(),
+            state.selectedContactId, state.composeText,
+            state.localUser->getKeyBundle().spk, state.contactCache);
       } else if (state.viewingGroup && state.selectedGroupId >= 0) {
         sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
-                         state.accessToken, state.selectedGroupId,
-                         state.myUserId, state.composeText);
+                         state.localUser->getAccessToken(),
+                         state.selectedGroupId, state.localUser->getId(),
+                         state.composeText);
       }
       state.composeText.clear();
       scr.PostEvent(Event::Custom);
@@ -470,10 +472,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto rebuildLabels = [&] {
     allLabels->clear();
     std::ranges::transform(
-        state.contacts, std::back_inserter(*allLabels), [&](const auto &u) {
-          const bool ver = state.identityCache.contains(u.getId()) &&
-                           state.identityCache.at(u.getId()).verified;
-          return std::string(ver ? "v " : "  ") + u.getUsername();
+        state.contacts, std::back_inserter(*allLabels), [](const auto &c) {
+          return std::string(c.isVerified() ? "v " : "  ") + c.getUsername();
         });
     std::ranges::transform(state.groups, std::back_inserter(*allLabels),
                            [](const auto &g) { return "  " + g.getName(); });
@@ -487,12 +487,15 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       state.selectedContactId = state.contacts.at(menuSelected).getId();
       state.viewingGroup = false;
       state.messageStore.clear();
-      try {
-        receiveDirectMessages(api, state.ratchets, state.messageStore,
-                              state.accessToken, state.myUserId,
-                              state.keyBundle.spk, std::nullopt,
-                              state.keyBundle.pq, state.identityCache, api);
-      } catch (...) {
+      if (state.localUser) {
+        try {
+          receiveDirectMessages(
+              api, state.ratchets, state.messageStore,
+              state.localUser->getAccessToken(), state.localUser->getId(),
+              state.localUser->getKeyBundle().spk, std::nullopt,
+              state.localUser->getKeyBundle().pq, state.contactCache, api);
+        } catch (...) {
+        }
       }
     } else if (menuSelected - ci < static_cast<int>(state.groups.size())) {
       state.selectedGroupId = state.groups.at(menuSelected - ci).getId();
@@ -546,9 +549,9 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   });
   auto btnMarkVerified = Button(" Mark as verified ", [&] {
     if (state.selectedContactId >= 0 &&
-        state.identityCache.contains(state.selectedContactId)) {
-      state.identityCache[state.selectedContactId].verified = true;
-      identityCacheSave("known_identities.json", state.identityCache);
+        state.contactCache.contains(state.selectedContactId)) {
+      state.contactCache.at(state.selectedContactId).markVerified();
+      contactCacheSave("known_identities.json", state.contactCache);
     }
     state.showIdentityOverlay = false;
     scr.PostEvent(Event::Custom);

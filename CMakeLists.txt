@@ -39,8 +39,11 @@ add_library(securemsg_models)
 target_sources(securemsg_models PUBLIC
     FILE_SET CXX_MODULES FILES
         src/models/user.cppm
+        src/models/contact.cppm
+        src/models/local_user.cppm
         src/models/group.cppm
         src/models/models.cppm)
+target_link_libraries(securemsg_models PUBLIC securemsg_crypto)
 target_compile_options(securemsg_models PRIVATE -Wall -Wextra)
 
 # ── Crypto ────────────────────────────────────────────────────────────────────

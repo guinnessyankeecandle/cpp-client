@@ -1,13 +1,10 @@
 module;
 #include <array>
 #include <cstdint>
-#include <filesystem>
 #include <fstream>
-#include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <vector>
 export module securemsg.crypto.keystore;
 import securemsg.crypto.random;
@@ -24,12 +21,6 @@ export struct KeyBundle {
   MlKemKeyPair pq;
   std::vector<uint8_t> pqSig;
   std::vector<X25519KeyPair> opks;
-};
-
-export struct Identity {
-  std::string username;
-  std::vector<uint8_t> identityPub;
-  bool verified{false};
 };
 
 static constexpr int PBKDF2_ITERATIONS = 600000;
@@ -141,38 +132,4 @@ export KeyBundle keystoreLoad(const std::string &path,
 
   OPENSSL_cleanse(payload.data(), payload.size());
   return kb;
-}
-
-export void
-identityCacheSave(const std::string &path,
-                  const std::unordered_map<int32_t, Identity> &cache) {
-  nlohmann::json j;
-  for (const auto &[id, identity] : cache) {
-    j[std::to_string(id)] = {
-        {"username", identity.username},
-        {"identity_pub", base64Encode(identity.identityPub)},
-        {"verified", identity.verified}};
-  }
-  std::ofstream f(path);
-  if (!f)
-    throw std::runtime_error("Cannot write identity cache: " + path);
-  f << j.dump(2);
-}
-
-export std::unordered_map<int32_t, Identity>
-identityCacheLoad(const std::string &path) {
-  std::unordered_map<int32_t, Identity> cache;
-  if (!std::filesystem::exists(path))
-    return cache;
-  std::ifstream f(path);
-  auto j = nlohmann::json::parse(f);
-  for (auto &[key, val] : j.items()) {
-    int32_t id = std::stoi(key);
-    Identity ident;
-    ident.username = val.value("username", "");
-    ident.identityPub = base64Decode(val.value("identity_pub", ""));
-    ident.verified = val.value("verified", false);
-    cache[id] = std::move(ident);
-  }
-  return cache;
 }
