@@ -5,25 +5,27 @@ export module securemsg.models.user;
 
 export class User {
 public:
-    User() = default;
-    User(int32_t id, std::string username,
+    // Caller decides whether to move or copy the value into these
+    // User u (std::move(string)) - pass by reference object destroyed.
+    // User u (string) - pass by value, copy made origional left ok
+    User(const int32_t id, std::string username,
          std::string accessToken, std::string refreshToken)
-        : m_id(id)
-        , m_username(std::move(username))
-        , m_accessToken(std::move(accessToken))
-        , m_refreshToken(std::move(refreshToken)) {}
+        : user_id(id)
+        , user_username(std::move(username))
+        , user_accessToken(std::move(accessToken))
+        , user_refreshToken(std::move(refreshToken)) {}
 
-    int32_t            getId()           const { return m_id; }
-    const std::string& getUsername()     const { return m_username; }
-    const std::string& getAccessToken()  const { return m_accessToken; }
-    const std::string& getRefreshToken() const { return m_refreshToken; }
+    [[nodiscard]] int32_t            getId()           const { return user_id; }
+    [[nodiscard]] const std::string& getUsername()     const { return user_username; }
+    [[nodiscard]] const std::string& getAccessToken()  const { return user_accessToken; }
+    [[nodiscard]] const std::string& getRefreshToken() const { return user_refreshToken; }
 
-    void setAccessToken(std::string t)  { m_accessToken  = std::move(t); }
-    void setRefreshToken(std::string t) { m_refreshToken = std::move(t); }
+    void setAccessToken(std::string token)  { user_accessToken  = std::move(token); }
+    void setRefreshToken(std::string token) { user_refreshToken = std::move(token); }
 
 private:
-    int32_t     m_id{0};
-    std::string m_username;
-    std::string m_accessToken;
-    std::string m_refreshToken;
+    int32_t     user_id;
+    std::string user_username;
+    std::string user_accessToken;
+    std::string user_refreshToken;
 };
