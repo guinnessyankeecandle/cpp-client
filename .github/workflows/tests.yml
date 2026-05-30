@@ -5,9 +5,7 @@ on:
 
 env:
   OPENSSL_VERSION: "3.4.1"
-  OPENSSL_ROOT: "/usr/local"
-  OPENSSL_RPATH: "/usr/local/lib64"
-  LD_LIBRARY_PATH: "/usr/local/lib64"
+  OPENSSL_PREFIX: "/usr/local/openssl"
 
 jobs:
   test:
@@ -20,20 +18,25 @@ jobs:
           sudo apt-get install -y build-essential perl
           curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
           cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_ROOT }} --openssldir=${{ env.OPENSSL_ROOT }}/ssl
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
           make -j$(nproc)
           sudo make install_sw
-          sudo ldconfig
       - name: Install dependencies
         run: sudo apt-get install -y ninja-build cmake clang libcurl4-openssl-dev nlohmann-json3-dev qrencode
       - name: Configure
         env:
           CC: clang
           CXX: clang++
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_ROOT }} -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_RPATH }} -Wno-dev
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_PREFIX }} \
+            -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_PREFIX }}/lib \
+            -Wno-dev
       - name: Build
         run: cmake --build build --target cybersec_tests -j$(nproc)
       - name: Run
+        env:
+          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
         run: ctest --test-dir build --output-on-failure
 
   coverage:
@@ -46,10 +49,9 @@ jobs:
           sudo apt-get install -y build-essential perl
           curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
           cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_ROOT }} --openssldir=${{ env.OPENSSL_ROOT }}/ssl
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
           make -j$(nproc)
           sudo make install_sw
-          sudo ldconfig
       - name: Install dependencies
         run: sudo apt-get install -y ninja-build cmake clang llvm libcurl4-openssl-dev nlohmann-json3-dev qrencode
       - name: Configure
@@ -59,11 +61,16 @@ jobs:
         run: |
           cmake -B build-coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping" \
-            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_ROOT }} -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_RPATH }} -Wno-dev
+            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_PREFIX }} \
+            -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_PREFIX }}/lib \
+            -Wno-dev
       - name: Build
         run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
       - name: Run
-        run: LLVM_PROFILE_FILE="coverage-%p.profraw" ctest --test-dir build-coverage --output-on-failure
+        env:
+          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
+          LLVM_PROFILE_FILE: "coverage-%p.profraw"
+        run: ctest --test-dir build-coverage --output-on-failure
       - name: Merge profiles
         run: llvm-profdata merge -sparse coverage-*.profraw -o coverage.profdata
       - name: Report coverage
@@ -75,7 +82,7 @@ jobs:
           awk '/TOTAL/{if ($10+0 < 95.0) {print "Coverage below 95%: " $10; exit 1}}' \
             coverage_report.txt
 
-  asan:
+  sanitise:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -84,18 +91,12 @@ jobs:
           - name: ASan
             cxx_flags: "-fsanitize=address -fno-omit-frame-pointer"
             linker_flags: "-fsanitize=address"
-            env_var: ASAN_OPTIONS
-            env_val: "halt_on_error=1:detect_leaks=1:suppressions=${{ github.workspace }}/lsan.supp"
           - name: UBSan
             cxx_flags: "-fsanitize=undefined -fno-omit-frame-pointer"
             linker_flags: "-fsanitize=undefined"
-            env_var: UBSAN_OPTIONS
-            env_val: "halt_on_error=1:print_stacktrace=1"
           - name: TSan
             cxx_flags: "-fsanitize=thread -fno-omit-frame-pointer"
             linker_flags: "-fsanitize=thread"
-            env_var: TSAN_OPTIONS
-            env_val: "halt_on_error=1"
     steps:
       - uses: actions/checkout@v4
       - name: Install OpenSSL 3.4
@@ -104,10 +105,9 @@ jobs:
           sudo apt-get install -y build-essential perl
           curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
           cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_ROOT }} --openssldir=${{ env.OPENSSL_ROOT }}/ssl
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
           make -j$(nproc)
           sudo make install_sw
-          sudo ldconfig
       - name: Install dependencies
         run: sudo apt-get install -y ninja-build cmake clang libcurl4-openssl-dev nlohmann-json3-dev
       - name: Configure with ${{ matrix.name }}
@@ -118,10 +118,15 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}" \
-            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_ROOT }} -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_RPATH }} -Wno-dev
+            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_PREFIX }} \
+            -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_PREFIX }}/lib \
+            -Wno-dev
       - name: Build
         run: cmake --build build --target cybersec_tests -j$(nproc)
       - name: Run under ${{ matrix.name }}
         env:
-          ${{ matrix.env_var }}: ${{ matrix.env_val }}
+          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
+          ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1:suppressions=${{ github.workspace }}/lsan.supp"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+          TSAN_OPTIONS: "halt_on_error=1"
         run: ctest --test-dir build --output-on-failure
