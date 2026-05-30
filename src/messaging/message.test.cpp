@@ -25,7 +25,7 @@ TEST_CASE("GroupMessage construction and getters", "[message]") {
   const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received};
   REQUIRE(gm.getId() == 1);
   REQUIRE(gm.getGroupId() == 10);
-  REQUIRE(gm.getEpoch() == 2);
+  REQUIRE(gm.getChainEpoch() == 2);
   REQUIRE(gm.getUserId() == 42);
   REQUIRE(gm.getCiphertext() == "ct");
   REQUIRE(gm.getPlaintext().empty());

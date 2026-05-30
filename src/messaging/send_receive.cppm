@@ -70,6 +70,8 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
   }
 
   auto &ratchet = ratchets.at(recipientId);
+  const uint32_t sendEpoch = ratchet.getEpoch();
+  const uint32_t sendSeq = ratchet.getNextSendSeq();
   std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto msg = ratchet.encrypt(plaintextBytes);
 
@@ -77,9 +79,13 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
       api.sendMessage(accessToken, recipientId, base64Encode(msg.ciphertext),
                       base64Encode(msg.headerCiphertext));
   const int32_t msgId = result.value("id", 0);
-  Message sent{msgId, recipientId, base64Encode(msg.ciphertext),
+  Message sent{msgId,
+               recipientId,
+               base64Encode(msg.ciphertext),
                base64Encode(msg.headerCiphertext),
-               BaseMessage::Direction::Sent};
+               BaseMessage::Direction::Sent,
+               sendEpoch,
+               sendSeq};
   sent.setPlaintext(plaintext);
   store.add(std::move(sent));
   return {msgId};
@@ -113,10 +119,14 @@ export void receiveDirectMessages(
       auto &ratchet = ratchets.at(otherUserId);
       RatchetMessage rmsg{base64Decode(m.value("ratchet_header_enc", "")),
                           base64Decode(m.value("ciphertext", ""))};
-      auto plain = ratchet.decrypt(rmsg);
-      Message msg{id, otherUserId, m.value("ciphertext", ""),
+      auto [plain, epoch, seq] = ratchet.decrypt(rmsg);
+      Message msg{id,
+                  otherUserId,
+                  m.value("ciphertext", ""),
                   m.value("ratchet_header_enc", ""),
-                  BaseMessage::Direction::Received};
+                  BaseMessage::Direction::Received,
+                  epoch,
+                  seq};
       msg.setPlaintext(std::string(plain.begin(), plain.end()));
       store.add(std::move(msg));
     } catch (...) {
@@ -180,6 +190,9 @@ sendGroupMessage(ApiClient &api, const GroupSenderKeys &senderKeys,
 
   const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto wire = ratchet.encrypt(plaintextBytes);
+  const uint32_t sentIter = (uint32_t(wire[0]) << 24) |
+                            (uint32_t(wire[1]) << 16) |
+                            (uint32_t(wire[2]) << 8) | uint32_t(wire[3]);
 
   const auto groupInfo = api.getGroup(accessToken, groupId);
   const int32_t epoch = groupInfo.value("epoch", 0);
@@ -191,7 +204,8 @@ sendGroupMessage(ApiClient &api, const GroupSenderKeys &senderKeys,
                     epoch,
                     myUserId,
                     base64Encode(wire),
-                    BaseMessage::Direction::Sent};
+                    BaseMessage::Direction::Sent,
+                    sentIter};
   sent.setPlaintext(plaintext);
   store.add(std::move(sent));
   return {msgId};
@@ -219,13 +233,14 @@ export void receiveGroupMessages(ApiClient &api, GroupRatchetMap &groupRatchets,
     try {
       auto &ratchet = groupRatchets.at(groupId).at(senderId);
       auto wire = base64Decode(m.value("ciphertext", ""));
-      auto plain = ratchet.decrypt(wire);
+      auto [plain, iter] = ratchet.decrypt(wire);
       GroupMessage msg{id,
                        groupId,
                        m.value("epoch", 0),
                        senderId,
                        m.value("ciphertext", ""),
-                       BaseMessage::Direction::Received};
+                       BaseMessage::Direction::Received,
+                       iter};
       msg.setPlaintext(std::string(plain.begin(), plain.end()));
       store.add(std::move(msg));
     } catch (...) {

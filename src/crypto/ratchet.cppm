@@ -3,6 +3,7 @@ module;
 #include <map>
 #include <openssl/crypto.h>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -66,7 +67,12 @@ public:
     return out;
   }
 
-  std::vector<uint8_t> decrypt(const std::vector<uint8_t> &wire) {
+  struct DecryptResult {
+    std::vector<uint8_t> plaintext;
+    uint32_t iteration;
+  };
+
+  DecryptResult decrypt(const std::vector<uint8_t> &wire) {
     if (wire.size() < 4)
       throw std::runtime_error("SenderKey message too short");
     const uint32_t iter = (uint32_t(wire[0]) << 24) |
@@ -79,7 +85,7 @@ public:
       m_MKSKIPPED.erase(it);
       auto plain = aeadDecrypt(unpackAead(body), mk);
       OPENSSL_cleanse(mk.data(), mk.size());
-      return plain;
+      return {std::move(plain), iter};
     }
 
     if (iter < m_iteration)
@@ -100,7 +106,7 @@ public:
 
     auto plain = aeadDecrypt(unpackAead(body), mk);
     OPENSSL_cleanse(mk.data(), mk.size());
-    return plain;
+    return {std::move(plain), iter};
   }
 
 private:
@@ -163,17 +169,33 @@ public:
     return {packAead(hdrPkt), packAead(bodyPkt)};
   }
 
-  std::vector<uint8_t> decrypt(const RatchetMessage &msg) {
-    auto hdr = decryptHeader(msg.headerCiphertext);
-    auto pkt = unpackAead(msg.ciphertext);
+  [[nodiscard]] uint32_t getEpoch() const { return m_epoch; }
+  [[nodiscard]] uint32_t getNextSendSeq() const { return m_Ns; }
 
-    auto skippedKey = std::make_pair(hdr.dhPub, hdr.n);
-    if (auto it = m_MKSKIPPED.find(skippedKey); it != m_MKSKIPPED.end()) {
+  struct DecryptResult {
+    std::vector<uint8_t> plaintext;
+    uint32_t chainEpoch; // increments on each DH ratchet step
+    uint32_t seqInChain; // message number within this chain (= header.n)
+  };
+
+  DecryptResult decrypt(const RatchetMessage &msg) {
+    const auto hdr = decryptHeader(msg.headerCiphertext);
+    const auto pkt = unpackAead(msg.ciphertext);
+    const auto msgKey = std::make_pair(hdr.dhPub, hdr.n);
+
+    if (m_processed.contains(msgKey))
+      throw std::runtime_error("Replayed message detected");
+
+    if (const auto it = m_MKSKIPPED.find(msgKey); it != m_MKSKIPPED.end()) {
       auto mk = it->second;
       m_MKSKIPPED.erase(it);
       auto plain = aeadDecrypt(pkt, mk);
       OPENSSL_cleanse(mk.data(), mk.size());
-      return plain;
+      m_processed.insert(msgKey);
+      const uint32_t epoch = m_dhPubToEpoch.count(hdr.dhPub)
+                                 ? m_dhPubToEpoch.at(hdr.dhPub)
+                                 : m_epoch;
+      return {std::move(plain), epoch, hdr.n};
     }
 
     if (hdr.dhPub != m_DHr) {
@@ -188,7 +210,8 @@ public:
 
     auto plain = aeadDecrypt(pkt, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
-    return plain;
+    m_processed.insert(msgKey);
+    return {std::move(plain), m_epoch, hdr.n};
   }
 
 private:
@@ -201,8 +224,11 @@ private:
   uint32_t m_Ns{0};
   uint32_t m_Nr{0};
   uint32_t m_PN{0};
+  uint32_t m_epoch{0};
   std::map<std::pair<std::vector<uint8_t>, uint32_t>, std::vector<uint8_t>>
       m_MKSKIPPED;
+  std::set<std::pair<std::vector<uint8_t>, uint32_t>> m_processed;
+  std::map<std::vector<uint8_t>, uint32_t> m_dhPubToEpoch;
 
   void skipMessageKeys(uint32_t until) {
     if (m_Nr > until)
@@ -222,6 +248,7 @@ private:
     m_Ns = 0;
     m_Nr = 0;
     m_DHr = newDHr;
+    m_dhPubToEpoch[newDHr] = ++m_epoch;
     auto [rk1, ckr] = kdfRk(m_RK, x25519DH(m_DHs.priv, newDHr));
     m_DHs = x25519Generate();
     auto [rk2, cks] = kdfRk(rk1, x25519DH(m_DHs.priv, newDHr));

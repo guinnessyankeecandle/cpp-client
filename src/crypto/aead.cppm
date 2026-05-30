@@ -21,12 +21,13 @@ export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
                               const std::vector<uint8_t> &key) {
   using CipherCtxPtr = OsslHandle<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
 
-  AeadPacket pkt;
-  pkt.iv = randomBytes(IV_BYTES);
-  pkt.tag.resize(TAG_BYTES);
-  pkt.ciphertext.resize(plaintext.size());
+  AeadPacket packet;
+  // Random defensive in case 2 messages share the same key (shouldn't happen with double rachet)
+  packet.iv = randomBytes(IV_BYTES);
+  packet.tag.resize(TAG_BYTES);
+  packet.ciphertext.resize(plaintext.size());
 
-  auto ctx = CipherCtxPtr(EVP_CIPHER_CTX_new());
+  const auto ctx = CipherCtxPtr(EVP_CIPHER_CTX_new());
   if (!ctx)
     throw std::runtime_error("EVP_CIPHER_CTX_new failed");
 
@@ -34,23 +35,23 @@ export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
                                nullptr),
             "EncryptInit");
   sslAssert(EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(),
-                               pkt.iv.data()),
+                               packet.iv.data()),
             "EncryptInit key/iv");
 
   int outLen = 0;
   if (!plaintext.empty())
-    sslAssert(EVP_EncryptUpdate(ctx.get(), pkt.ciphertext.data(), &outLen,
+    sslAssert(EVP_EncryptUpdate(ctx.get(), packet.ciphertext.data(), &outLen,
                                 plaintext.data(),
                                 static_cast<int>(plaintext.size())),
               "EncryptUpdate");
 
   sslAssert(
-      EVP_EncryptFinal_ex(ctx.get(), pkt.ciphertext.data() + outLen, &outLen),
+      EVP_EncryptFinal_ex(ctx.get(), packet.ciphertext.data() + outLen, &outLen),
       "EncryptFinal");
   sslAssert(EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, TAG_BYTES,
-                                pkt.tag.data()),
+                                packet.tag.data()),
             "GetTag");
-  return pkt;
+  return packet;
 }
 
 export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
@@ -61,7 +62,7 @@ export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
       static_cast<int>(pkt.tag.size()) != TAG_BYTES)
     throw std::runtime_error("Invalid AEAD packet");
 
-  auto ctx = CipherCtxPtr(EVP_CIPHER_CTX_new());
+  const auto ctx = CipherCtxPtr(EVP_CIPHER_CTX_new());
   if (!ctx)
     throw std::runtime_error("EVP_CIPHER_CTX_new failed");
 

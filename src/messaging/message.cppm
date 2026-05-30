@@ -8,9 +8,10 @@ public:
   enum class Direction { Sent, Received };
 
   BaseMessage(const int32_t id, const int32_t userId, std::string ciphertext,
-              const Direction dir)
+              const Direction dir, const uint32_t chainEpoch = 0,
+              const uint32_t seqInChain = 0)
       : m_id(id), m_userId(userId), m_ciphertext(std::move(ciphertext)),
-        m_direction(dir) {}
+        m_direction(dir), m_chainEpoch(chainEpoch), m_seqInChain(seqInChain) {}
 
   [[nodiscard]] int32_t getId() const { return m_id; }
   [[nodiscard]] int32_t getUserId() const { return m_userId; }
@@ -18,6 +19,8 @@ public:
     return m_ciphertext;
   }
   [[nodiscard]] Direction getDirection() const { return m_direction; }
+  [[nodiscard]] uint32_t getChainEpoch() const { return m_chainEpoch; }
+  [[nodiscard]] uint32_t getSeqInChain() const { return m_seqInChain; }
   // Returns a read-only reference
   [[nodiscard]] const std::string &getPlaintext() const { return m_plaintext; }
   void setPlaintext(std::string p) { m_plaintext = std::move(p); }
@@ -26,13 +29,17 @@ private:
   int32_t m_id, m_userId;
   std::string m_ciphertext, m_plaintext;
   Direction m_direction;
+  uint32_t m_chainEpoch;
+  uint32_t m_seqInChain;
 };
 
 export class Message : public BaseMessage {
 public:
   Message(const int32_t id, const int32_t otherUserId, std::string ciphertext,
-          std::string ratchetHeaderEnc, const Direction dir)
-      : BaseMessage(id, otherUserId, std::move(ciphertext), dir),
+          std::string ratchetHeaderEnc, const Direction dir,
+          const uint32_t chainEpoch = 0, const uint32_t seqInChain = 0)
+      : BaseMessage(id, otherUserId, std::move(ciphertext), dir, chainEpoch,
+                    seqInChain),
         m_ratchetHeaderEnc(std::move(ratchetHeaderEnc)) {}
 
   [[nodiscard]] const std::string &getRatchetHeaderEnc() const {
@@ -47,13 +54,13 @@ export class GroupMessage : public BaseMessage {
 public:
   GroupMessage(const int32_t id, const int32_t groupId, const int32_t epoch,
                const int32_t senderId, std::string ciphertext,
-               const Direction dir)
-      : BaseMessage(id, senderId, std::move(ciphertext), dir),
-        m_groupId(groupId), m_epoch(epoch) {}
+               const Direction dir, const uint32_t seqInChain = 0)
+      : BaseMessage(id, senderId, std::move(ciphertext), dir, epoch,
+                    seqInChain),
+        m_groupId(groupId) {}
 
   [[nodiscard]] int32_t getGroupId() const { return m_groupId; }
-  [[nodiscard]] int32_t getEpoch() const { return m_epoch; }
 
 private:
-  int32_t m_groupId, m_epoch;
+  int32_t m_groupId;
 };
