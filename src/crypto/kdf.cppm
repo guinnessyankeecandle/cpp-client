@@ -18,7 +18,7 @@ export std::vector<uint8_t> hkdf(const std::vector<uint8_t> &ikm,
   if (!kdf)
     throw std::runtime_error("EVP_KDF_fetch HKDF failed");
 
-  auto ctx = KdfCtxPtr(EVP_KDF_CTX_new(kdf));
+  const auto ctx = KdfCtxPtr(EVP_KDF_CTX_new(kdf));
   EVP_KDF_free(kdf);
   if (!ctx)
     throw std::runtime_error("EVP_KDF_CTX_new failed");
