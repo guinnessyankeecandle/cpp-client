@@ -23,7 +23,6 @@ export struct KeyBundle {
   std::vector<X25519KeyPair> opks;
 };
 
-static constexpr int PBKDF2_ITERATIONS = 600000;
 static constexpr int PBKDF2_SALT_BYTES = 16;
 static constexpr int OPK_BATCH_SIZE = 20;
 
@@ -64,7 +63,7 @@ export void keystoreSave(const std::string &path, const KeyBundle &kb,
   }
 
   auto salt = randomBytes(PBKDF2_SALT_BYTES);
-  auto encKey = pbkdf2(password, salt, PBKDF2_ITERATIONS, KEY_BYTES);
+  auto encKey = pbkdf2(password, salt, KEY_BYTES);
   auto pkt = aeadEncrypt(payload, encKey);
   OPENSSL_cleanse(encKey.data(), encKey.size());
   OPENSSL_cleanse(payload.data(), payload.size());
@@ -90,8 +89,7 @@ export KeyBundle keystoreLoad(const std::string &path,
   std::vector<uint8_t> rest((std::istreambuf_iterator<char>(f)),
                             std::istreambuf_iterator<char>());
 
-  auto encKey = pbkdf2(password, {salt.begin(), salt.end()}, PBKDF2_ITERATIONS,
-                       KEY_BYTES);
+  auto encKey = pbkdf2(password, {salt.begin(), salt.end()}, KEY_BYTES);
   auto pkt = unpackAead(rest);
   auto payload = aeadDecrypt(pkt, encKey);
   OPENSSL_cleanse(encKey.data(), encKey.size());

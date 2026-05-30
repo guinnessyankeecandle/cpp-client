@@ -35,19 +35,19 @@ TEST_CASE("HKDF different salts produce different keys", "[kdf]") {
 
 TEST_CASE("PBKDF2 output length is correct", "[kdf]") {
   const std::vector<uint8_t> salt(16, 0xAB);
-  const auto out = pbkdf2("password", salt, 1000, 32);
+  const auto out = pbkdf2(\1, 32);
   REQUIRE(out.size() == 32);
 }
 
 TEST_CASE("PBKDF2 different passwords produce different keys", "[kdf]") {
   const std::vector<uint8_t> salt(16, 0x01);
-  const auto a = pbkdf2("password1", salt, 1000, 32);
-  const auto b = pbkdf2("password2", salt, 1000, 32);
+  const auto a = pbkdf2(\1, 32);
+  const auto b = pbkdf2(\1, 32);
   REQUIRE(a != b);
 }
 
 TEST_CASE("PBKDF2 different salts produce different keys", "[kdf]") {
-  const auto a = pbkdf2("password", std::vector<uint8_t>(16, 0x01), 1000, 32);
-  const auto b = pbkdf2("password", std::vector<uint8_t>(16, 0x02), 1000, 32);
+  const auto a = pbkdf2(\1, 32);
+  const auto b = pbkdf2(\1, 32);
   REQUIRE(a != b);
 }
