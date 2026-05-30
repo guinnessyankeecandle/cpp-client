@@ -12,7 +12,7 @@ TEST_CASE("Direct message ratchet encrypt-decrypt roundtrip",
   auto bob = RatchetState::initReceiver(sk, spk);
   std::vector<uint8_t> plain = {'h', 'e', 'l', 'l', 'o'};
   auto msg = alice.encrypt(plain);
-  REQUIRE(bob.decrypt(msg) == plain);
+  REQUIRE(bob.decrypt(msg).plaintext == plain);
 }
 
 TEST_CASE("Multiple direct messages decrypt in order", "[send_receive]") {
@@ -22,7 +22,7 @@ TEST_CASE("Multiple direct messages decrypt in order", "[send_receive]") {
   auto bob = RatchetState::initReceiver(sk, spk);
   for (uint8_t i = 0; i < 10; ++i) {
     std::vector<uint8_t> p = {i};
-    REQUIRE(bob.decrypt(alice.encrypt(p)) == p);
+    REQUIRE(bob.decrypt(alice.encrypt(p)).plaintext == p);
   }
 }
 
@@ -31,9 +31,12 @@ TEST_CASE("Bidirectional ratchet exchange", "[send_receive]") {
   auto spk = x25519Generate();
   auto alice = RatchetState::initSender(sk, spk.pub);
   auto bob = RatchetState::initReceiver(sk, spk);
-  REQUIRE(bob.decrypt(alice.encrypt({0xAA})) == std::vector<uint8_t>{0xAA});
-  REQUIRE(alice.decrypt(bob.encrypt({0xBB})) == std::vector<uint8_t>{0xBB});
-  REQUIRE(bob.decrypt(alice.encrypt({0xCC})) == std::vector<uint8_t>{0xCC});
+  REQUIRE(bob.decrypt(alice.encrypt({0xAA})).plaintext ==
+          std::vector<uint8_t>{0xAA});
+  REQUIRE(alice.decrypt(bob.encrypt({0xBB})).plaintext ==
+          std::vector<uint8_t>{0xBB});
+  REQUIRE(bob.decrypt(alice.encrypt({0xCC})).plaintext ==
+          std::vector<uint8_t>{0xCC});
 }
 
 TEST_CASE("SkdmEpochTracker stale incoming discarded", "[send_receive]") {
