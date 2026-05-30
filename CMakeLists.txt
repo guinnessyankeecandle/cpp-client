@@ -16,26 +16,26 @@ find_package(Catch2 REQUIRED)
 add_library(securemsg_models)
 target_sources(securemsg_models PUBLIC
     FILE_SET CXX_MODULES FILES
-        src/securemsg/models/user.cppm
-        src/securemsg/models/group.cppm
-        src/securemsg/models/models.cppm)
+        src/models/user.cppm
+        src/models/group.cppm
+        src/models/models.cppm)
 target_compile_options(securemsg_models PRIVATE -Wall -Wextra)
 
 # ── Crypto ────────────────────────────────────────────────────────────────────
 add_library(securemsg_crypto)
 target_sources(securemsg_crypto PUBLIC
     FILE_SET CXX_MODULES FILES
-        src/securemsg/crypto/random.cppm
-        src/securemsg/crypto/aead.cppm
-        src/securemsg/crypto/kdf.cppm
-        src/securemsg/crypto/ed25519.cppm
-        src/securemsg/crypto/x25519.cppm
-        src/securemsg/crypto/mlkem.cppm
-        src/securemsg/crypto/pqxdh.cppm
-        src/securemsg/crypto/ratchet.cppm
-        src/securemsg/crypto/keystore.cppm
-        src/securemsg/crypto/srp.cppm
-        src/securemsg/crypto/crypto.cppm)
+        src/crypto/random.cppm
+        src/crypto/aead.cppm
+        src/crypto/kdf.cppm
+        src/crypto/ed25519.cppm
+        src/crypto/x25519.cppm
+        src/crypto/mlkem.cppm
+        src/crypto/pqxdh.cppm
+        src/crypto/ratchet.cppm
+        src/crypto/keystore.cppm
+        src/crypto/srp.cppm
+        src/crypto/crypto.cppm)
 target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 
@@ -43,9 +43,9 @@ target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 add_library(securemsg_network)
 target_sources(securemsg_network PUBLIC
     FILE_SET CXX_MODULES FILES
-        src/securemsg/network/http.cppm
-        src/securemsg/network/api.cppm
-        src/securemsg/network/network.cppm)
+        src/network/http.cppm
+        src/network/api.cppm
+        src/network/network.cppm)
 target_link_libraries(securemsg_network PUBLIC CURL::libcurl nlohmann_json::nlohmann_json)
 target_compile_options(securemsg_network PRIVATE -Wall -Wextra)
 
@@ -53,10 +53,10 @@ target_compile_options(securemsg_network PRIVATE -Wall -Wextra)
 add_library(securemsg_messaging)
 target_sources(securemsg_messaging PUBLIC
     FILE_SET CXX_MODULES FILES
-        src/securemsg/messaging/message.cppm
-        src/securemsg/messaging/store.cppm
-        src/securemsg/messaging/send_receive.cppm
-        src/securemsg/messaging/messaging.cppm)
+        src/messaging/message.cppm
+        src/messaging/store.cppm
+        src/messaging/send_receive.cppm
+        src/messaging/messaging.cppm)
 target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models)
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
@@ -72,7 +72,7 @@ include(CTest)
 file(GLOB_RECURSE TEST_SOURCES src/**/*.test.cpp)
 if(TEST_SOURCES)
     add_executable(cybersec_tests
-        src/securemsg/test_main.cpp
+        src/test_main.cpp
         ${TEST_SOURCES})
     target_link_libraries(cybersec_tests PRIVATE
         securemsg_models securemsg_crypto securemsg_messaging
