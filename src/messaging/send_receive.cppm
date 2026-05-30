@@ -97,7 +97,7 @@ export void receiveDirectMessages(
   for (const auto &m : messages) {
     const int32_t id = m.value("id", 0);
     const int32_t otherUserId = m.value("sender_id", 0);
-    if (store.contains(id))
+    if (store.containsDirect(otherUserId, id))
       continue;
     if (!ratchets.contains(otherUserId))
       continue;
@@ -194,7 +194,7 @@ export void receiveGroupMessages(ApiClient &api, GroupRatchetMap &groupRatchets,
     const int32_t senderId = m.value("sender_id", 0);
     if (senderId == myUserId)
       continue; // don't store messages we sent
-    if (store.contains(id))
+    if (store.containsGroup(groupId, id))
       continue;
     if (!groupRatchets.contains(groupId) ||
         !groupRatchets.at(groupId).contains(senderId))

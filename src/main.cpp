@@ -515,16 +515,19 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   const auto rightPanel = Renderer(
       Container::Vertical({composeInput, btnSend}), [&, composeInput, btnSend] {
         Elements msgs;
-        for (const auto &anyMsg : state.messageStore.getAll()) {
-          std::visit(
-              [&](const auto &m) {
-                const bool mine =
-                    m.getDirection() == BaseMessage::Direction::Sent;
-                auto line =
-                    text((mine ? " You: " : " Them: ") + m.getPlaintext());
-                msgs.push_back(mine ? line | align_right : line);
-              },
-              anyMsg);
+        if (state.viewingGroup && state.selectedGroupId >= 0) {
+          for (const auto &m :
+               state.messageStore.getByGroup(state.selectedGroupId)) {
+            auto line = text(" Them: " + m.getPlaintext());
+            msgs.push_back(line);
+          }
+        } else if (!state.viewingGroup && state.selectedContactId >= 0) {
+          for (const auto &m :
+               state.messageStore.getByUser(state.selectedContactId)) {
+            const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
+            auto line = text((mine ? " You: " : " Them: ") + m.getPlaintext());
+            msgs.push_back(mine ? line | align_right : line);
+          }
         }
         if (msgs.empty())
           msgs.push_back(text(" No messages yet ") | dim | center);
