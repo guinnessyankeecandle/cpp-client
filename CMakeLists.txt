@@ -43,7 +43,7 @@ target_sources(securemsg_models PUBLIC
         src/models/local_user.cppm
         src/models/group.cppm
         src/models/models.cppm)
-target_link_libraries(securemsg_models PUBLIC securemsg_crypto)
+target_link_libraries(securemsg_models PUBLIC securemsg_crypto nlohmann_json::nlohmann_json)
 target_compile_options(securemsg_models PRIVATE -Wall -Wextra)
 
 # ── Crypto ────────────────────────────────────────────────────────────────────

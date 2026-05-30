@@ -169,9 +169,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
                                   state.regTotpCode);
       state.localUser.emplace(tokens.value("user_id", 0), state.regUsername,
                               tokens["access_token"].get<std::string>(),
-                              tokens["refresh_token"].get<std::string>());
-      state.localUser->generateKeys();
-      state.localUser->saveKeys("identity.key", state.regPassword);
+                              tokens["refresh_token"].get<std::string>(),
+                              "identity.key", state.regPassword);
       std::vector<std::string> opkPubs;
       std::ranges::transform(
           state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
@@ -279,14 +278,12 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
     }
     try {
       auto tokens = api.verify2FA(state.loginPreAuthToken, state.loginTotpCode);
+      const bool isNewDevice = !std::filesystem::exists("identity.key");
       state.localUser.emplace(tokens.value("user_id", 0), state.loginUsername,
                               tokens["access_token"].get<std::string>(),
-                              tokens["refresh_token"].get<std::string>());
-      if (std::filesystem::exists("identity.key")) {
-        state.localUser->loadKeys("identity.key", state.loginPassword);
-      } else {
-        state.localUser->generateKeys();
-        state.localUser->saveKeys("identity.key", state.loginPassword);
+                              tokens["refresh_token"].get<std::string>(),
+                              "identity.key", state.loginPassword);
+      if (isNewDevice) {
         std::vector<std::string> opkPubs;
         std::ranges::transform(
             state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
@@ -301,14 +298,12 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
       const auto countRes =
           api.getPrekeysCount(state.localUser->getAccessToken());
       if (countRes.value("count", 0) < 10) {
-        std::vector<std::string> newOpkPubs;
-        for (const int i = 0; i < 20; ++i) {
-          auto kp = x25519Generate();
-          newOpkPubs.push_back(base64Encode(kp.pub));
-          state.localUser->getKeyBundle().opks.push_back(std::move(kp));
-        }
-        api.uploadPrekeys(state.localUser->getAccessToken(), newOpkPubs);
-        state.localUser->saveKeys("identity.key", state.loginPassword);
+        const auto newOpkPubs =
+            state.localUser->replenishOneTimePrekeys(20U, state.loginPassword);
+        std::vector<std::string> newOpkPubsB64;
+        std::ranges::transform(newOpkPubs, std::back_inserter(newOpkPubsB64),
+                               [](const auto &p) { return base64Encode(p); });
+        api.uploadPrekeys(state.localUser->getAccessToken(), newOpkPubsB64);
       }
 
       state.contactCache = contactCacheLoad("known_identities.json");
