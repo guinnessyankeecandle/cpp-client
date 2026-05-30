@@ -8,9 +8,31 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 
-find_package(nlohmann_json REQUIRED)
-find_package(ftxui REQUIRED)
-find_package(Catch2 REQUIRED)
+include(FetchContent)
+
+find_package(nlohmann_json QUIET)
+if(NOT nlohmann_json_FOUND)
+    FetchContent_Declare(nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3)
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
+find_package(ftxui QUIET)
+if(NOT ftxui_FOUND)
+    FetchContent_Declare(ftxui
+        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
+        GIT_TAG        v5.0.0)
+    FetchContent_MakeAvailable(ftxui)
+endif()
+
+find_package(Catch2 QUIET)
+if(NOT Catch2_FOUND)
+    FetchContent_Declare(Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG        v2.13.10)
+    FetchContent_MakeAvailable(Catch2)
+endif()
 
 # ── Models ────────────────────────────────────────────────────────────────────
 add_library(securemsg_models)
@@ -69,13 +91,13 @@ target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 include(CTest)
-file(GLOB_RECURSE TEST_SOURCES src/**/*.test.cpp)
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS src/*.test.cpp)
 if(TEST_SOURCES)
     add_executable(cybersec_tests
         src/test_main.cpp
         ${TEST_SOURCES})
     target_link_libraries(cybersec_tests PRIVATE
-        securemsg_models securemsg_crypto securemsg_messaging
+        securemsg_models securemsg_crypto securemsg_network securemsg_messaging
         Catch2::Catch2)
     add_test(NAME cybersec_tests COMMAND cybersec_tests)
 endif()
