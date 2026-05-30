@@ -2,9 +2,6 @@ name: Build
 
 on:
   push:
-    branches: [main, dev]
-  pull_request:
-    branches: [main, dev]
 
 jobs:
   build:
@@ -16,7 +13,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake clang \
             libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \
-            libftxui-dev catch2-dev qrencode
+            qrencode
       - name: Configure
         env:
           CC: clang

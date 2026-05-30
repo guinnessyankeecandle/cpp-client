@@ -2,9 +2,6 @@ name: Fuzzing
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
   fuzz:
@@ -28,19 +25,5 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # When parsing or crypto input handling exists, add a fuzz target:
-      #
-      #   src/fuzz/fuzz_input.cpp:
-      #     extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-      #         // call your parsing or crypto function with data/size
-      #         return 0;
-      #     }
-      #
-      #   In src/CMakeLists.txt add:
-      #     add_executable(cybersec_fuzz src/fuzz/fuzz_input.cpp)
-      #     target_link_libraries(cybersec_fuzz PRIVATE utils crypto comms "-fsanitize=fuzzer,address")
-      #
-      #   Then change the run step to:
-      #     ./build/cybersec_fuzz -max_total_time=30
       - name: Run fuzz targets
         run: echo "Placeholder — fuzz targets added when parsing/crypto input logic exists"
