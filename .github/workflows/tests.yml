@@ -3,61 +3,37 @@ name: Tests
 on:
   push:
 
-env:
-  OPENSSL_VERSION: "3.4.1"
-  OPENSSL_PREFIX: "/usr/local/openssl"
-
 jobs:
   test:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install OpenSSL 3.4
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential perl
-          curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
-          cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
-          make -j$(nproc)
-          sudo make install_sw
-          echo "${{ env.OPENSSL_PREFIX }}/lib" | sudo tee /etc/ld.so.conf.d/00-custom-openssl.conf
-          sudo ldconfig
       - name: Install dependencies
-        run: sudo apt-get install -y ninja-build cmake clang libcurl4-openssl-dev nlohmann-json3-dev qrencode
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang openssl curl nlohmann-json catch2 qrencode
       - name: Configure
         env:
           CC: clang
           CXX: clang++
-        run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_PREFIX }} \
-            -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_PREFIX }}/lib \
-            -Wno-dev
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -Wno-dev
       - name: Build
         run: cmake --build build --target cybersec_tests -j$(nproc)
-      - name: Verify OpenSSL version
-        run: ldd build/cybersec_tests | grep crypto
       - name: Run
         run: ctest --test-dir build --output-on-failure
 
   coverage:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install OpenSSL 3.4
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential perl
-          curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
-          cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
-          make -j$(nproc)
-          sudo make install_sw
-          echo "${{ env.OPENSSL_PREFIX }}/lib" | sudo tee /etc/ld.so.conf.d/00-custom-openssl.conf
-          sudo ldconfig
       - name: Install dependencies
-        run: sudo apt-get install -y ninja-build cmake clang llvm libcurl4-openssl-dev nlohmann-json3-dev qrencode
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang llvm openssl curl nlohmann-json catch2 qrencode
       - name: Configure
         env:
           CC: clang
@@ -65,8 +41,6 @@ jobs:
         run: |
           cmake -B build-coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping" \
-            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_PREFIX }} \
-            -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_PREFIX }}/lib \
             -Wno-dev
       - name: Build
         run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
@@ -87,6 +61,8 @@ jobs:
 
   sanitise:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     strategy:
       fail-fast: false
       matrix:
@@ -102,19 +78,10 @@ jobs:
             linker_flags: "-fsanitize=thread"
     steps:
       - uses: actions/checkout@v4
-      - name: Install OpenSSL 3.4
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential perl
-          curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
-          cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
-          make -j$(nproc)
-          sudo make install_sw
-          echo "${{ env.OPENSSL_PREFIX }}/lib" | sudo tee /etc/ld.so.conf.d/00-custom-openssl.conf
-          sudo ldconfig
       - name: Install dependencies
-        run: sudo apt-get install -y ninja-build cmake clang libcurl4-openssl-dev nlohmann-json3-dev
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang openssl curl nlohmann-json catch2
       - name: Configure with ${{ matrix.name }}
         env:
           CC: clang
@@ -123,8 +90,6 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}" \
-            -DOPENSSL_ROOT_DIR=${{ env.OPENSSL_PREFIX }} \
-            -DCMAKE_BUILD_RPATH=${{ env.OPENSSL_PREFIX }}/lib \
             -Wno-dev
       - name: Build
         run: cmake --build build --target cybersec_tests -j$(nproc)
