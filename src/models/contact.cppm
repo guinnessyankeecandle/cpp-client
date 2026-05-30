@@ -4,7 +4,6 @@ module;
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <string>
-#include <unordered_map>
 #include <vector>
 export module securemsg.models.contact;
 import securemsg.models.user;
@@ -28,33 +27,34 @@ private:
   bool m_verified;
 };
 
-export void
-contactCacheSave(const std::string &path,
-                 const std::unordered_map<int32_t, Contact> &contacts) {
-  nlohmann::json j;
-  for (const auto &[id, c] : contacts) {
-    j[std::to_string(id)] = {{"username", c.getUsername()},
-                             {"identity_pub", base64Encode(c.getIdentityPub())},
-                             {"verified", c.isVerified()}};
+export void contactCacheSave(const std::string &path,
+                             const std::vector<Contact> &contacts) {
+  nlohmann::json root;
+  for (const auto &contact : contacts) {
+    // JSON object keys must be strings
+    root[std::to_string(contact.getId())] = {
+        {"username", contact.getUsername()},
+        {"identity_pub", base64Encode(contact.getIdentityPub())},
+        {"verified", contact.isVerified()}};
   }
-  std::ofstream f(path);
-  if (!f)
+  std::ofstream file(path);
+  if (!file)
     throw std::runtime_error("Cannot write contact cache: " + path);
-  f << j.dump(2);
+  file << root.dump(2); // pretty pring
 }
 
-export std::unordered_map<int32_t, Contact>
-contactCacheLoad(const std::string &path) {
-  std::unordered_map<int32_t, Contact> contacts;
+export std::vector<Contact> contactCacheLoad(const std::string &path) {
+  std::vector<Contact> contacts;
   if (!std::filesystem::exists(path))
     return contacts;
-  std::ifstream f(path);
-  const auto j = nlohmann::json::parse(f);
-  for (const auto &[key, val] : j.items()) {
+  std::ifstream file(path);
+  const auto root = nlohmann::json::parse(file);
+  for (const auto &[key, entry] : root.items()) {
     const int32_t id = std::stoi(key);
-    contacts.emplace(id, Contact{id, val.value("username", ""),
-                                 base64Decode(val.value("identity_pub", "")),
-                                 val.value("verified", false)});
+    contacts.emplace_back(
+        id, entry.at("username").get<std::string>(),
+        base64Decode(entry.at("identity_pub").get<std::string>()),
+        entry.at("verified").get<bool>());
   }
   return contacts;
 }

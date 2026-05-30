@@ -38,7 +38,7 @@ struct AppState {
   GroupRatchetMap groupRatchets;
   GroupSenderKeys groupSenderKeys;
 
-  std::unordered_map<int32_t, Contact> contactCache;
+  std::vector<Contact> contactCache;
   std::vector<Contact> contacts;
   std::vector<Group> groups;
   int32_t selectedContactId{-1};
@@ -418,12 +418,13 @@ static void openIdentityOverlay(AppState &state) {
   const int32_t targetId = state.viewingGroup ? -1 : state.selectedContactId;
   if (targetId < 0)
     return;
-  const auto it = state.contactCache.find(targetId);
+  const auto it = std::ranges::find_if(
+      state.contactCache, [&](const auto &c) { return c.getId() == targetId; });
   if (it == state.contactCache.end())
     return;
-  state.overlayTargetName = it->second.getUsername();
-  state.overlayKeyB64 = base64Encode(it->second.getIdentityPub());
-  state.overlayVerified = it->second.isVerified();
+  state.overlayTargetName = it->getUsername();
+  state.overlayKeyB64 = base64Encode(it->getIdentityPub());
+  state.overlayVerified = it->isVerified();
   state.showIdentityOverlay = true;
 }
 
@@ -543,10 +544,15 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     scr.PostEvent(Event::Custom);
   });
   auto btnMarkVerified = Button(" Mark as verified ", [&] {
-    if (state.selectedContactId >= 0 &&
-        state.contactCache.contains(state.selectedContactId)) {
-      state.contactCache.at(state.selectedContactId).markVerified();
-      contactCacheSave("known_identities.json", state.contactCache);
+    if (state.selectedContactId >= 0) {
+      const auto it =
+          std::ranges::find_if(state.contactCache, [&](const auto &c) {
+            return c.getId() == state.selectedContactId;
+          });
+      if (it != state.contactCache.end()) {
+        it->markVerified();
+        contactCacheSave("known_identities.json", state.contactCache);
+      }
     }
     state.showIdentityOverlay = false;
     scr.PostEvent(Event::Custom);

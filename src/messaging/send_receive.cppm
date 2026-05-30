@@ -30,11 +30,12 @@ export struct SendResult {
 // ── Direct messaging
 // ──────────────────────────────────────────────────────────
 
-export SendResult
-sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
-                  const std::string &accessToken, int32_t recipientId,
-                  const std::string &plaintext, const X25519KeyPair &senderIk,
-                  const std::unordered_map<int32_t, Contact> &contactCache) {
+export SendResult sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
+                                    const std::string &accessToken,
+                                    int32_t recipientId,
+                                    const std::string &plaintext,
+                                    const X25519KeyPair &senderIk,
+                                    const std::vector<Contact> &contactCache) {
 
   if (!ratchets.contains(recipientId)) {
     auto bundle = api.getKeyBundle(accessToken, recipientId);
@@ -50,9 +51,11 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
     if (!bundle.value("one_time_prekey", "").empty())
       opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
-    if (const auto it = contactCache.find(recipientId);
+    if (const auto it = std::ranges::find_if(
+            contactCache,
+            [&](const auto &c) { return c.getId() == recipientId; });
         it != contactCache.end()) {
-      if (CRYPTO_memcmp(it->second.getIdentityPub().data(), ikEdPub.data(),
+      if (CRYPTO_memcmp(it->getIdentityPub().data(), ikEdPub.data(),
                         ikEdPub.size()) != 0)
         throw std::runtime_error("Identity key mismatch for user " +
                                  std::to_string(recipientId));
@@ -75,14 +78,12 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets,
   return {result.value("id", 0)};
 }
 
-export void
-receiveDirectMessages(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
-                      const std::string &accessToken, int32_t myUserId,
-                      const X25519KeyPair & /*mySpk*/,
-                      const std::optional<X25519KeyPair> &myOpk,
-                      const MlKemKeyPair &myPq,
-                      std::unordered_map<int32_t, Contact> & /*contactCache*/,
-                      const ApiClient &apiForLookup) {
+export void receiveDirectMessages(
+    ApiClient &api, RatchetMap &ratchets, MessageStore &store,
+    const std::string &accessToken, int32_t myUserId,
+    const X25519KeyPair & /*mySpk*/, const std::optional<X25519KeyPair> &myOpk,
+    const MlKemKeyPair &myPq, std::vector<Contact> & /*contactCache*/,
+    const ApiClient &apiForLookup) {
 
   auto messages = api.listMessages(accessToken);
   if (!messages.is_array())
