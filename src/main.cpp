@@ -38,6 +38,8 @@ struct AppState {
   KeyBundle keyBundle;
   std::unordered_map<int32_t, Identity> identityCache;
   RatchetMap ratchets;
+  GroupRatchetMap groupRatchets;
+  GroupSenderKeys groupSenderKeys;
 
   std::vector<User> contacts;
   std::vector<Group> groups;
@@ -382,6 +384,10 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
                   ? std::nullopt
                   : std::make_optional(state.keyBundle.opks.front()),
               state.keyBundle.pq, state.identityCache, api);
+        } else if (state.viewingGroup && state.selectedGroupId >= 0) {
+          receiveGroupMessages(api, state.groupRatchets, state.messageStore,
+                               state.accessToken, state.selectedGroupId,
+                               state.myUserId);
         }
         if (++contactTick >= 6) {
           contactTick = 0;
@@ -446,6 +452,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         sendDirectMessage(api, state.ratchets, state.accessToken,
                           state.selectedContactId, state.composeText,
                           state.keyBundle.spk, state.identityCache);
+      } else if (state.viewingGroup && state.selectedGroupId >= 0) {
+        sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
+                         state.accessToken, state.selectedGroupId,
+                         state.myUserId, state.composeText);
       }
       state.composeText.clear();
       scr.PostEvent(Event::Custom);
@@ -506,10 +516,16 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   const auto rightPanel = Renderer(
       Container::Vertical({composeInput, btnSend}), [&, composeInput, btnSend] {
         Elements msgs;
-        for (const auto &m : state.messageStore.getAll()) {
-          const bool mine = m.getDirection() == Message::Direction::Sent;
-          auto line = text((mine ? " You: " : " Them: ") + m.getPlaintext());
-          msgs.push_back(mine ? line | align_right : line);
+        for (const auto &anyMsg : state.messageStore.getAll()) {
+          std::visit(
+              [&](const auto &m) {
+                const bool mine =
+                    m.getDirection() == BaseMessage::Direction::Sent;
+                auto line =
+                    text((mine ? " You: " : " Them: ") + m.getPlaintext());
+                msgs.push_back(mine ? line | align_right : line);
+              },
+              anyMsg);
         }
         if (msgs.empty())
           msgs.push_back(text(" No messages yet ") | dim | center);

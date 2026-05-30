@@ -4,6 +4,7 @@ module;
 #include <openssl/crypto.h>
 #include <optional>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 export module securemsg.crypto.ratchet;
 import securemsg.crypto.random;
@@ -35,6 +36,86 @@ kdfRk(const std::vector<uint8_t> &rk, const std::vector<uint8_t> &dhOut) {
   auto newCk = hkdf(dhOut, rk, "ratchet-chain-init", 32);
   return {std::move(newRk), std::move(newCk)};
 }
+
+// ── Sender Key Ratchet (group messages) ─────────────────────────────────────
+
+export class SenderKeyRatchetState {
+public:
+  static constexpr uint32_t MAX_SKIP = 1000;
+
+  static SenderKeyRatchetState init(const std::vector<uint8_t> &senderKey) {
+    SenderKeyRatchetState s;
+    s.m_CK = hkdf(senderKey, {}, "sender-key-chain-init", 32);
+    return s;
+  }
+
+  // Wire format: 4-byte big-endian iteration || AEAD-encrypted body
+  std::vector<uint8_t> encrypt(const std::vector<uint8_t> &plaintext) {
+    auto [newCk, mk] = advanceCk(m_CK);
+    m_CK = std::move(newCk);
+
+    std::vector<uint8_t> out(4);
+    for (int i = 3; i >= 0; --i)
+      out[3 - i] = static_cast<uint8_t>((m_iteration >> (i * 8)) & 0xFF);
+    m_iteration++;
+
+    auto pkt = aeadEncrypt(plaintext, mk);
+    OPENSSL_cleanse(mk.data(), mk.size());
+    auto packed = packAead(pkt);
+    out.insert(out.end(), packed.begin(), packed.end());
+    return out;
+  }
+
+  std::vector<uint8_t> decrypt(const std::vector<uint8_t> &wire) {
+    if (wire.size() < 4)
+      throw std::runtime_error("SenderKey message too short");
+    const uint32_t iter = (uint32_t(wire[0]) << 24) |
+                          (uint32_t(wire[1]) << 16) | (uint32_t(wire[2]) << 8) |
+                          uint32_t(wire[3]);
+    const std::vector<uint8_t> body(wire.begin() + 4, wire.end());
+
+    if (auto it = m_MKSKIPPED.find(iter); it != m_MKSKIPPED.end()) {
+      auto mk = it->second;
+      m_MKSKIPPED.erase(it);
+      auto plain = aeadDecrypt(unpackAead(body), mk);
+      OPENSSL_cleanse(mk.data(), mk.size());
+      return plain;
+    }
+
+    if (iter < m_iteration)
+      throw std::runtime_error("SenderKey: duplicate or replayed message");
+    if (iter - m_iteration > MAX_SKIP)
+      throw std::runtime_error("SenderKey: too many skipped messages");
+
+    while (m_iteration < iter) {
+      auto [newCk, mk] = advanceCk(m_CK);
+      m_MKSKIPPED[m_iteration] = mk;
+      m_CK = std::move(newCk);
+      m_iteration++;
+    }
+
+    auto [newCk, mk] = advanceCk(m_CK);
+    m_CK = std::move(newCk);
+    m_iteration++;
+
+    auto plain = aeadDecrypt(unpackAead(body), mk);
+    OPENSSL_cleanse(mk.data(), mk.size());
+    return plain;
+  }
+
+private:
+  std::vector<uint8_t> m_CK;
+  uint32_t m_iteration{0};
+  std::unordered_map<uint32_t, std::vector<uint8_t>> m_MKSKIPPED;
+
+  static std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
+  advanceCk(const std::vector<uint8_t> &ck) {
+    return {hkdf(ck, {}, "sender-key-chain", 32),
+            hkdf(ck, {}, "sender-key-message", 32)};
+  }
+};
+
+// ── Double Ratchet (direct messages) ────────────────────────────────────────
 
 export class RatchetState {
 public:

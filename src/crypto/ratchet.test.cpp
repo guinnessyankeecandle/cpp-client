@@ -53,3 +53,54 @@ TEST_CASE("Ratchet too many skipped messages throws", "[ratchet]") {
     msgs.push_back(alice.encrypt({static_cast<uint8_t>(i)}));
   REQUIRE_THROWS_AS(bob.decrypt(msgs.back()), std::runtime_error);
 }
+
+TEST_CASE("SenderKeyRatchet single message roundtrip", "[ratchet]") {
+  auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob = SenderKeyRatchetState::init(sk);
+  const std::vector<uint8_t> plain = {1, 2, 3, 4};
+  REQUIRE(bob.decrypt(alice.encrypt(plain)) == plain);
+}
+
+TEST_CASE("SenderKeyRatchet multiple messages in order", "[ratchet]") {
+  auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob = SenderKeyRatchetState::init(sk);
+  for (uint8_t i = 0; i < 10; ++i) {
+    std::vector<uint8_t> p = {i};
+    REQUIRE(bob.decrypt(alice.encrypt(p)) == p);
+  }
+}
+
+TEST_CASE("SenderKeyRatchet out-of-order messages decrypt correctly",
+          "[ratchet]") {
+  auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob = SenderKeyRatchetState::init(sk);
+  auto m1 = alice.encrypt({1});
+  auto m2 = alice.encrypt({2});
+  auto m3 = alice.encrypt({3});
+  REQUIRE(bob.decrypt(m2) == std::vector<uint8_t>{2});
+  REQUIRE(bob.decrypt(m1) == std::vector<uint8_t>{1});
+  REQUIRE(bob.decrypt(m3) == std::vector<uint8_t>{3});
+}
+
+TEST_CASE("SenderKeyRatchet multiple recipients share same sender key",
+          "[ratchet]") {
+  auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob = SenderKeyRatchetState::init(sk);
+  auto carol = SenderKeyRatchetState::init(sk);
+  auto wire = alice.encrypt({0xAB});
+  REQUIRE(bob.decrypt(wire) == std::vector<uint8_t>{0xAB});
+  REQUIRE(carol.decrypt(wire) == std::vector<uint8_t>{0xAB});
+}
+
+TEST_CASE("SenderKeyRatchet duplicate message throws", "[ratchet]") {
+  auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob = SenderKeyRatchetState::init(sk);
+  auto wire = alice.encrypt({1});
+  bob.decrypt(wire);
+  REQUIRE_THROWS_AS(bob.decrypt(wire), std::runtime_error);
+}
