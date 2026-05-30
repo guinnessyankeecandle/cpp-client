@@ -18,9 +18,11 @@ jobs:
           sudo apt-get install -y build-essential perl
           curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
           cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib enable-unstable-algorithms
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
           make -j$(nproc)
           sudo make install_sw
+          echo "${{ env.OPENSSL_PREFIX }}/lib" | sudo tee /etc/ld.so.conf.d/00-custom-openssl.conf
+          sudo ldconfig
       - name: Install dependencies
         run: sudo apt-get install -y ninja-build cmake clang libcurl4-openssl-dev nlohmann-json3-dev qrencode
       - name: Configure
@@ -34,9 +36,9 @@ jobs:
             -Wno-dev
       - name: Build
         run: cmake --build build --target cybersec_tests -j$(nproc)
+      - name: Verify OpenSSL version
+        run: ldd build/cybersec_tests | grep crypto
       - name: Run
-        env:
-          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
         run: ctest --test-dir build --output-on-failure
 
   coverage:
@@ -49,9 +51,11 @@ jobs:
           sudo apt-get install -y build-essential perl
           curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
           cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib enable-unstable-algorithms
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
           make -j$(nproc)
           sudo make install_sw
+          echo "${{ env.OPENSSL_PREFIX }}/lib" | sudo tee /etc/ld.so.conf.d/00-custom-openssl.conf
+          sudo ldconfig
       - name: Install dependencies
         run: sudo apt-get install -y ninja-build cmake clang llvm libcurl4-openssl-dev nlohmann-json3-dev qrencode
       - name: Configure
@@ -68,7 +72,6 @@ jobs:
         run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
       - name: Run
         env:
-          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
           LLVM_PROFILE_FILE: "coverage-%p.profraw"
         run: ctest --test-dir build-coverage --output-on-failure
       - name: Merge profiles
@@ -105,9 +108,11 @@ jobs:
           sudo apt-get install -y build-essential perl
           curl -fsSL https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz | tar xz
           cd openssl-${{ env.OPENSSL_VERSION }}
-          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib enable-unstable-algorithms
+          ./Configure --prefix=${{ env.OPENSSL_PREFIX }} --openssldir=${{ env.OPENSSL_PREFIX }}/ssl --libdir=lib
           make -j$(nproc)
           sudo make install_sw
+          echo "${{ env.OPENSSL_PREFIX }}/lib" | sudo tee /etc/ld.so.conf.d/00-custom-openssl.conf
+          sudo ldconfig
       - name: Install dependencies
         run: sudo apt-get install -y ninja-build cmake clang libcurl4-openssl-dev nlohmann-json3-dev
       - name: Configure with ${{ matrix.name }}
@@ -125,7 +130,6 @@ jobs:
         run: cmake --build build --target cybersec_tests -j$(nproc)
       - name: Run under ${{ matrix.name }}
         env:
-          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
           LSAN_OPTIONS: "suppressions=${{ github.workspace }}/lsan.supp"
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
