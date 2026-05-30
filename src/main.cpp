@@ -72,7 +72,7 @@ static Element qrElement(const std::string& uri) {
     struct PipeDeleter { void operator()(FILE* f) const { pclose(f); } };
     using PipePtr = std::unique_ptr<FILE, PipeDeleter>;
 
-    auto pipe = PipePtr(popen(("qrencode -t UTF8 -o - -- '" + uri + "'").c_str(), "r"));
+    const auto pipe = PipePtr(popen(("qrencode -t UTF8 -o - -- '" + uri + "'").c_str(), "r"));
     if (!pipe)
         return paragraph(" Install qrencode: sudo dnf install qrencode ") | color(Color::Red);
 
@@ -128,7 +128,7 @@ Component makeRegisterScreen(AppState& state, ScreenInteractive& scr, ApiClient&
         try {
             state.regStatus = "Computing SRP verifier...";
             std::string saltHex;
-            auto verifier = srpComputeVerifier(state.regUsername, state.regPassword, saltHex);
+            const auto verifier = srpComputeVerifier(state.regUsername, state.regPassword, saltHex);
             auto res = api.registerUser(state.regUsername, saltHex, verifier);
             state.regStatus = "Registered! Scan the QR code with your authenticator.";
             if (res.contains("totp_provisioning_uri"))
@@ -144,7 +144,7 @@ Component makeRegisterScreen(AppState& state, ScreenInteractive& scr, ApiClient&
         if (state.regTotpCode.empty()) { state.regTotpStatus = "Enter the 6-digit code."; return; }
         try {
             SrpSession srp;
-            auto A      = srp.begin(state.regUsername, state.regPassword);
+            const auto A = srp.begin(state.regUsername, state.regPassword);
             auto init   = api.srpInit(state.regUsername, A);
             auto verify = api.srpVerify(init["session_id"],
                             srp.computeProof(init["srp_salt"], init["server_public"]));
@@ -159,8 +159,7 @@ Component makeRegisterScreen(AppState& state, ScreenInteractive& scr, ApiClient&
             state.keyBundle = keystoreGenerate();
             keystoreSave("identity.key", state.keyBundle, state.regPassword);
             std::vector<std::string> opkPubs;
-            std::transform(state.keyBundle.opks.begin(), state.keyBundle.opks.end(),
-                           std::back_inserter(opkPubs),
+            std::ranges::transform(state.keyBundle.opks, std::back_inserter(opkPubs),
                            [](const X25519KeyPair& k){ return base64Encode(k.pub); });
             api.publishKeyBundle(state.accessToken,
                 base64Encode(state.keyBundle.ik.pub),
@@ -227,7 +226,7 @@ Component makeLoginScreen(AppState& state, ScreenInteractive& scr, ApiClient& ap
         try {
             state.loginStatus = "Authenticating...";
             SrpSession srp;
-            auto A      = srp.begin(state.loginUsername, state.loginPassword);
+            const auto A = srp.begin(state.loginUsername, state.loginPassword);
             auto init   = api.srpInit(state.loginUsername, A);
             auto verify = api.srpVerify(init["session_id"],
                             srp.computeProof(init["srp_salt"], init["server_public"]));
@@ -257,8 +256,7 @@ Component makeLoginScreen(AppState& state, ScreenInteractive& scr, ApiClient& ap
                 state.keyBundle = keystoreGenerate();
                 keystoreSave("identity.key", state.keyBundle, state.loginPassword);
                 std::vector<std::string> opkPubs;
-                std::transform(state.keyBundle.opks.begin(), state.keyBundle.opks.end(),
-                               std::back_inserter(opkPubs),
+                std::ranges::transform(state.keyBundle.opks, std::back_inserter(opkPubs),
                                [](const X25519KeyPair& k){ return base64Encode(k.pub); });
                 api.publishKeyBundle(state.accessToken,
                     base64Encode(state.keyBundle.ik.pub),
@@ -269,7 +267,7 @@ Component makeLoginScreen(AppState& state, ScreenInteractive& scr, ApiClient& ap
                     base64Encode(state.keyBundle.pqSig));
             }
 
-            auto countRes = api.getPrekeysCount(state.accessToken);
+            const auto countRes = api.getPrekeysCount(state.accessToken);
             if (countRes.value("count", 0) < 10) {
                 std::vector<std::string> newOpkPubs;
                 for (int i = 0; i < 20; ++i) {
@@ -365,9 +363,9 @@ static void stopPolling(AppState& state) {
 }
 
 static void openIdentityOverlay(AppState& state) {
-    int32_t targetId = state.viewingGroup ? -1 : state.selectedContactId;
+    const int32_t targetId = state.viewingGroup ? -1 : state.selectedContactId;
     if (targetId < 0) return;
-    auto it = state.identityCache.find(targetId);
+    const auto it = state.identityCache.find(targetId);
     if (it == state.identityCache.end()) return;
     state.overlayTargetName = it->second.username;
     state.overlayKeyB64     = base64Encode(it->second.identityPub);
@@ -397,12 +395,12 @@ Component makeMainScreen(AppState& state, ScreenInteractive& scr, ApiClient& api
     });
 
     int menuSelected = 0;
-    auto allLabels = std::make_shared<std::vector<std::string>>();
+    const auto allLabels = std::make_shared<std::vector<std::string>>();
 
     auto rebuildLabels = [&] {
         allLabels->clear();
         for (const auto& u : state.contacts) {
-            bool ver = state.identityCache.contains(u.getId())
+            const bool ver = state.identityCache.contains(u.getId())
                     && state.identityCache.at(u.getId()).verified;
             allLabels->push_back(std::string(ver ? "v " : "  ") + u.getUsername());
         }
@@ -413,7 +411,7 @@ Component makeMainScreen(AppState& state, ScreenInteractive& scr, ApiClient& api
 
     MenuOption menuOpt;
     menuOpt.on_enter = [&] {
-        int ci = static_cast<int>(state.contacts.size());
+        const int ci = static_cast<int>(state.contacts.size());
         if (menuSelected < ci) {
             state.selectedContactId = state.contacts.at(menuSelected).getId();
             state.viewingGroup      = false;
@@ -433,7 +431,7 @@ Component makeMainScreen(AppState& state, ScreenInteractive& scr, ApiClient& api
     };
 
     auto leftMenu  = Menu(allLabels.get(), &menuSelected, menuOpt);
-    auto leftPanel = Renderer(leftMenu, [&, leftMenu] {
+    const auto leftPanel = Renderer(leftMenu, [&, leftMenu] {
         rebuildLabels();
         return vbox({
             text(" Contacts / Groups ") | bold | center,
@@ -442,11 +440,11 @@ Component makeMainScreen(AppState& state, ScreenInteractive& scr, ApiClient& api
         }) | border;
     });
 
-    auto rightPanel = Renderer(Container::Vertical({composeInput, btnSend}),
+    const auto rightPanel = Renderer(Container::Vertical({composeInput, btnSend}),
         [&, composeInput, btnSend] {
         Elements msgs;
         for (const auto& m : state.messageStore.getAll()) {
-            bool mine = m.getDirection() == Message::Direction::Sent;
+            const bool mine = m.getDirection() == Message::Direction::Sent;
             auto line = text((mine ? " You: " : " Them: ") + m.getPlaintext());
             msgs.push_back(mine ? line | align_right : line);
         }
@@ -508,7 +506,7 @@ Component makeMainScreen(AppState& state, ScreenInteractive& scr, ApiClient& api
             if (!state.showIdentityOverlay) return base;
             return dbox({base, overlayComp->Render()});
         }),
-        [&](Event e) {
+        [&](const Event& e) {
             if (e == Event::Character('i')) {
                 openIdentityOverlay(state);
                 scr.PostEvent(Event::Custom);
@@ -536,7 +534,7 @@ int main() {
     auto login   = makeLoginScreen(state, scr, api);
     auto mainScr = makeMainScreen(state, scr, api);
 
-    auto root = CatchEvent(
+    const auto root = CatchEvent(
         Renderer(Container::Tab({welcome, reg, login, mainScr}, &screenIdx),
             [&, welcome, reg, login, mainScr] {
                 screenIdx = static_cast<int>(state.screen);
@@ -548,7 +546,7 @@ int main() {
                 }
                 return text("");
             }),
-        [](Event) { return false; }
+        [](const Event&) { return false; }
     );
 
     scr.Loop(root);
