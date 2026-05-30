@@ -11,20 +11,19 @@ TEST_CASE("LocalUser generates keys when file absent", "[local_user]") {
   REQUIRE(u.getUsername() == "alice");
   REQUIRE(u.getAccessToken() == "acc");
   REQUIRE(u.getRefreshToken() == "ref");
-  REQUIRE(u.hasKeys());
+  REQUIRE(u.getKeyBundle().ik.pub.size() == 32);
   REQUIRE(std::filesystem::exists(TEST_KEY_PATH));
   std::filesystem::remove(TEST_KEY_PATH);
 }
 
 TEST_CASE("LocalUser loads keys when file exists", "[local_user]") {
   std::filesystem::remove(TEST_KEY_PATH);
-  {
-    LocalUser first{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
-    (void)first;
-  }
+  const std::vector<uint8_t> firstPub = [&] {
+    const LocalUser first{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
+    return first.getKeyBundle().ik.pub;
+  }();
   const LocalUser second{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
-  REQUIRE(second.hasKeys());
-  REQUIRE(second.getKeyBundle().ik.pub.size() == 32);
+  REQUIRE(second.getKeyBundle().ik.pub == firstPub);
   std::filesystem::remove(TEST_KEY_PATH);
 }
 
