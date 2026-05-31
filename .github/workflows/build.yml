@@ -42,4 +42,4 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-pie -Wl,-z,relro,-z,now"
           cmake --build build --target securemsg
       - name: Run checksec
-        run: checksec --file=build/securemsg --output=cli
+        run: checksec file build/securemsg

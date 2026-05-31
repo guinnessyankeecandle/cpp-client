@@ -20,7 +20,6 @@ export {
 using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
 using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
 
-
 export inline void sslAssert(const int return_code, const char *op) {
   if (return_code != 1)
     throw std::runtime_error(std::string(op) + " failed");
@@ -62,9 +61,9 @@ export RawKeyPair generateRawKeyPair(const int evpKeyType, const char *name) {
   sslAssert(EVP_PKEY_get_raw_private_key(key_pair_ptr.get(), kp.priv.data(),
                                          &privLen),
             (std::string(name) + " get_raw_private_key").c_str());
-  sslAssert(EVP_PKEY_get_raw_public_key(key_pair_ptr.get(), kp.pub.data(),
-                                        &pubLen),
-            (std::string(name) + " get_raw_public_key").c_str());
+  sslAssert(
+      EVP_PKEY_get_raw_public_key(key_pair_ptr.get(), kp.pub.data(), &pubLen),
+      (std::string(name) + " get_raw_public_key").c_str());
   return kp;
 }
 

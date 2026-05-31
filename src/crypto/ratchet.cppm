@@ -19,12 +19,13 @@ static constexpr uint32_t RATCHET_MAX_SKIP = 1000;
 // header: X25519 pub + prevChainLen (4 bytes) + messageIndex (4 bytes)
 static constexpr std::size_t HEADER_COUNTER_BYTES =
     sizeof(uint32_t) * 2; // prevChainLen + messageIndex
-static constexpr std::size_t HEADER_BYTES = X25519_KEY_BYTES + HEADER_COUNTER_BYTES;
+static constexpr std::size_t HEADER_BYTES =
+    X25519_KEY_BYTES + HEADER_COUNTER_BYTES;
 
 export struct RatchetHeader {
   std::vector<uint8_t> dhPub;
-  uint32_t prevChainLen;
-  uint32_t messageIndex;
+  uint32_t prevChainLen{0};
+  uint32_t messageIndex{0};
 };
 
 export struct RatchetMessage {
@@ -147,7 +148,7 @@ private:
 
 export class RatchetState {
 public:
-  // Initialise as sender (Alice) after PQXDH.
+  // Initialize as sender (Alice) after PQXDH.
   static RatchetState initSender(const std::vector<uint8_t> &sk,
                                  const std::vector<uint8_t> &bobSpkPub) {
     RatchetState ratchet_state;
@@ -162,7 +163,7 @@ public:
     return ratchet_state;
   }
 
-  // Initialise as receiver (Bob) after PQXDH.
+  // Initialize as receiver (Bob) after PQXDH.
   static RatchetState initReceiver(const std::vector<uint8_t> &sk,
                                    const RawKeyPair &signed_pre_key) {
     RatchetState ratchet_state;
@@ -176,14 +177,14 @@ public:
   RatchetMessage encrypt(const std::vector<uint8_t> &plaintext) {
     if (m_sendChainKey.empty())
       throw std::runtime_error(
-          "Cannot encrypt before receiving a message as initialisedReceiver");
+          "Cannot encrypt before receiving a message as initializedReceiver");
     auto [newSendChainKey, mk] = kdfCk(m_sendChainKey);
     m_sendChainKey = std::move(newSendChainKey);
 
     const RatchetHeader hdr{m_sendingKeyPair.pub, m_prevSendCount, m_sendCount};
     m_sendCount++;
 
-    const auto hdrBytes = serialiseHeader(hdr);
+    const auto hdrBytes = serializeHeader(hdr);
     const auto hdrPkt = aeadEncrypt(hdrBytes, m_headerKey);
 
     const auto bodyPkt = aeadEncrypt(plaintext, mk);
@@ -318,7 +319,7 @@ private:
     });
   }
 
-  static std::vector<uint8_t> serialiseHeader(const RatchetHeader &hdr) {
+  static std::vector<uint8_t> serializeHeader(const RatchetHeader &hdr) {
     std::vector<uint8_t> out(HEADER_BYTES);
     std::ranges::copy(hdr.dhPub, out.begin());
     std::memcpy(out.data() + X25519_KEY_BYTES, &hdr.prevChainLen,
@@ -328,7 +329,7 @@ private:
     return out;
   }
 
-  RatchetHeader decryptHeader(const std::vector<uint8_t> &hdrCt) const {
+  [[nodiscard]] RatchetHeader decryptHeader(const std::vector<uint8_t> &hdrCt) const {
     const auto pkt = unpackAead(hdrCt);
     auto bytes = aeadDecrypt(pkt, m_headerKey);
 

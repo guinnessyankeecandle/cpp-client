@@ -55,7 +55,8 @@ x25519PublicFromPrivate(const std::vector<uint8_t> &priv) {
   std::size_t pubLen = 0;
   EVP_PKEY_get_raw_public_key(key_private_ptr.get(), nullptr, &pubLen);
   std::vector<uint8_t> pub(pubLen);
-  sslAssert(EVP_PKEY_get_raw_public_key(key_private_ptr.get(), pub.data(), &pubLen),
-            "X25519 get_raw_public_key");
+  sslAssert(
+      EVP_PKEY_get_raw_public_key(key_private_ptr.get(), pub.data(), &pubLen),
+      "X25519 get_raw_public_key");
   return pub;
 }

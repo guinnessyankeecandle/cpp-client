@@ -4,7 +4,7 @@ import securemsg.crypto.random;
 TEST_CASE("randomBytes returns correct length", "[random]") {
   REQUIRE(randomBytes(16).size() == 16);
   REQUIRE(randomBytes(32).size() == 32);
-  REQUIRE(randomBytes(0).size() == 0);
+  REQUIRE(randomBytes(0).empty());
 }
 
 TEST_CASE("randomBytes two calls are not equal", "[random]") {
