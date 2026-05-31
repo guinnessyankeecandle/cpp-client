@@ -27,13 +27,53 @@ export struct SendResult {
   int32_t messageId;
 };
 
+static constexpr uint8_t PQXDH_FLAG_INITIAL = 0x01;
+static constexpr uint8_t PQXDH_FLAG_REGULAR = 0x00;
+static constexpr std::size_t PQXDH_FLAG_BYTES = 1;
+// 3× X25519_KEY_BYTES: senderIkXPub + ephemeralPub + usedOpkPub (all-zero if no OPK)
+static constexpr std::size_t PQXDH_PREFIX_BYTES =
+    PQXDH_FLAG_BYTES + X25519_KEY_BYTES + X25519_KEY_BYTES +
+    MLKEM1024_PUB_BYTES + X25519_KEY_BYTES;
+
+static std::vector<uint8_t>
+packRatchetHeader(const PqxdhSenderResult &pqxdh,
+                  const std::vector<uint8_t> &senderIkXPub,
+                  const std::optional<std::vector<uint8_t>> &usedOpkPub,
+                  const std::vector<uint8_t> &encryptedHeader) {
+  std::vector<uint8_t> out;
+  out.reserve(PQXDH_PREFIX_BYTES + encryptedHeader.size());
+  out.push_back(PQXDH_FLAG_INITIAL);
+  out.insert(out.end(), senderIkXPub.begin(), senderIkXPub.end());
+  out.insert(out.end(), pqxdh.ephemeralPub.begin(), pqxdh.ephemeralPub.end());
+  out.insert(out.end(), pqxdh.pqCiphertext.begin(), pqxdh.pqCiphertext.end());
+  if (usedOpkPub)
+    out.insert(out.end(), usedOpkPub->begin(), usedOpkPub->end());
+  else
+    out.insert(out.end(), X25519_KEY_BYTES, 0x00); // Set opk to 0s
+  out.insert(out.end(), encryptedHeader.begin(), encryptedHeader.end());
+  return out;
+}
+
+static std::vector<uint8_t>
+packRatchetHeader(const std::vector<uint8_t> &encryptedHeader) {
+  std::vector<uint8_t> out;
+  out.reserve(PQXDH_FLAG_BYTES + encryptedHeader.size());
+  out.push_back(PQXDH_FLAG_REGULAR);
+  out.insert(out.end(), encryptedHeader.begin(), encryptedHeader.end());
+  return out;
+}
+
 // Direct messaging
 
 export SendResult
-sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
+sendDirectMessage(const ApiClient &api, RatchetMap &ratchets, MessageStore &store,
                   const std::string &accessToken, int32_t recipientId,
                   const std::string &plaintext, const RawKeyPair &senderIk,
                   const std::vector<Contact> &contactCache) {
+
+  std::optional<PqxdhSenderResult> pqxdhResult;
+  std::vector<uint8_t> pqxdhSenderIkXPub;
+  std::optional<std::vector<uint8_t>> pqxdhUsedOpkPub;
 
   if (!ratchets.contains(recipientId)) {
     auto bundle = api.getKeyBundle(accessToken, recipientId);
@@ -52,83 +92,126 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
         !bundle["one_time_prekey"].is_null())
       opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
-    if (const auto it = std::ranges::find_if(
-            contactCache,
-            [&](const auto &c) { return c.getId() == recipientId; });
-        it != contactCache.end()) {
-      if (CRYPTO_memcmp(it->getIdentityPub().data(), ikEdPub.data(),
-                        ikEdPub.size()) != 0)
-        throw std::runtime_error("Identity key mismatch for user " +
-                                 std::to_string(recipientId));
-    }
+    const auto it = std::ranges::find_if(
+        contactCache, [&](const auto &c) { return c.getId() == recipientId; });
+    if (it != contactCache.end() &&
+        CRYPTO_memcmp(it->getIdentityPub().data(), ikEdPub.data(),
+                      ikEdPub.size()) != 0)
+      throw std::runtime_error("Identity key mismatch for user " +
+                               std::to_string(recipientId));
 
+    pqxdhUsedOpkPub = opkPub;
+    pqxdhSenderIkXPub = senderIk.pub;
     RemoteKeyBundle remote{ikEdPub, ikXPub, spkPub, spkSig,
                            opkPub,  pqPub,  pqSig};
-    auto pqxdhResult = pqxdhSend(senderIk, remote);
+
+    pqxdhResult = pqxdhSend(senderIk, remote);
     ratchets.emplace(recipientId,
-                     RatchetState::initSender(pqxdhResult.sessionKey, spkPub));
+                     RatchetState::initSender(pqxdhResult->sessionKey, spkPub));
+    OPENSSL_cleanse(pqxdhResult->sessionKey.data(),
+                    pqxdhResult->sessionKey.size());
   }
 
   auto &ratchet = ratchets.at(recipientId);
   const uint32_t sendEpoch = ratchet.getEpoch();
   const uint32_t sendSeq = ratchet.getNextSendSeq();
-  std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
+  const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto msg = ratchet.encrypt(plaintextBytes);
+
+  const auto packedHeader =
+      pqxdhResult ? packRatchetHeader(*pqxdhResult, pqxdhSenderIkXPub,
+                                      pqxdhUsedOpkPub, msg.headerCiphertext)
+                  : packRatchetHeader(msg.headerCiphertext);
 
   const auto result =
       api.sendMessage(accessToken, recipientId, base64Encode(msg.ciphertext),
-                      base64Encode(msg.headerCiphertext));
-  const int32_t msgId = result.value("id", 0);
-  Message sent{msgId,
-               recipientId,
-               base64Encode(msg.ciphertext),
-               base64Encode(msg.headerCiphertext),
-               BaseMessage::Direction::Sent,
-               sendEpoch,
-               sendSeq};
-  sent.setPlaintext(plaintext);
-  store.add(std::move(sent));
+                      base64Encode(packedHeader));
+  if (!result.contains("id"))
+    throw std::runtime_error("sendMessage: server response missing 'id'");
+  const int32_t msgId = result.at("id").get<int32_t>();
+
+  store.add(Message{msgId, recipientId, base64Encode(msg.ciphertext),
+                    base64Encode(packedHeader),
+                    BaseMessage::Direction::Sent, sendEpoch, sendSeq,
+                    plaintext});
   return {msgId};
 }
 
-export void receiveDirectMessages(
-    ApiClient &api, RatchetMap &ratchets, MessageStore &store,
-    const std::string &accessToken, int32_t myUserId,
-    const RawKeyPair & /*mySpk*/, const std::optional<RawKeyPair> &myOpk,
-    const RawKeyPair &myPq, std::vector<Contact> & /*contactCache*/,
-    const ApiClient &apiForLookup) {
-
+export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
+                                  MessageStore &store,
+                                  const std::string &accessToken,
+                                  const RawKeyPair &myIk,
+                                  const RawKeyPair &mySpk,
+                                  const std::vector<RawKeyPair> &myOpks,
+                                  const RawKeyPair &myPq) {
   auto messages = api.listMessages(accessToken);
   if (!messages.is_array())
     return;
 
-  (void)myUserId;
-  (void)myOpk;
-  (void)myPq;
-  (void)apiForLookup;
-
   for (const auto &m : messages) {
-    const int32_t id = m.value("id", 0);
-    const int32_t otherUserId = m.value("sender_id", 0);
+    if (!m.contains("id") || !m.contains("sender_id") ||
+        !m.contains("ciphertext") || !m.contains("ratchet_header_enc"))
+      throw std::runtime_error(
+          "receiveDirectMessages: malformed message from server");
+
+    const int32_t id = m.at("id").get<int32_t>();
+    const int32_t otherUserId = m.at("sender_id").get<int32_t>();
+
     if (store.containsDirect(otherUserId, id))
       continue;
-    if (!ratchets.contains(otherUserId))
+
+    auto rawHeader =
+        base64Decode(m.at("ratchet_header_enc").get<std::string>());
+    if (rawHeader.empty())
       continue;
+
+    const bool isInitial = rawHeader[0] == PQXDH_FLAG_INITIAL;
+
+    if (isInitial && !ratchets.contains(otherUserId)) {
+      if (rawHeader.size() < PQXDH_PREFIX_BYTES)
+        continue;
+
+      std::ptrdiff_t off = 1;
+      PqxdhInitialHeader hdr;
+      hdr.senderIkXPub.assign(rawHeader.begin() + off,
+                               rawHeader.begin() + off + X25519_KEY_BYTES);
+      off += static_cast<std::ptrdiff_t>(X25519_KEY_BYTES);
+      hdr.ephemeralPub.assign(rawHeader.begin() + off,
+                               rawHeader.begin() + off + X25519_KEY_BYTES);
+      off += static_cast<std::ptrdiff_t>(X25519_KEY_BYTES);
+      hdr.pqCiphertext.assign(rawHeader.begin() + off,
+                               rawHeader.begin() + off + MLKEM1024_PUB_BYTES);
+      off += static_cast<std::ptrdiff_t>(MLKEM1024_PUB_BYTES);
+
+      std::vector<uint8_t> opkField(rawHeader.begin() + off,
+                                    rawHeader.begin() + off + X25519_KEY_BYTES);
+      static const std::vector<uint8_t> zeroOpk(X25519_KEY_BYTES, 0x00);
+      if (opkField != zeroOpk)
+        hdr.usedOpkPub = std::move(opkField);
+
+      auto sessionKey = pqxdhReceive(myIk, mySpk, myOpks, myPq, hdr);
+      ratchets.emplace(otherUserId,
+                       RatchetState::initReceiver(sessionKey, mySpk));
+      OPENSSL_cleanse(sessionKey.data(), sessionKey.size());
+    } else if (!ratchets.contains(otherUserId)) {
+      continue;
+    }
+
+    // Strip the flag byte (and PQXDH prefix if initial) to get the encrypted header
+    const std::size_t prefixLen = isInitial ? PQXDH_PREFIX_BYTES : 1;
+    std::vector<uint8_t> encHeader(
+        rawHeader.begin() + static_cast<std::ptrdiff_t>(prefixLen),
+        rawHeader.end());
 
     try {
       auto &ratchet = ratchets.at(otherUserId);
-      RatchetMessage rmsg{base64Decode(m.value("ratchet_header_enc", "")),
-                          base64Decode(m.value("ciphertext", ""))};
+      RatchetMessage rmsg{std::move(encHeader),
+                          base64Decode(m.at("ciphertext").get<std::string>())};
       auto [plain, epoch, seq] = ratchet.decrypt(rmsg);
-      Message msg{id,
-                  otherUserId,
-                  m.value("ciphertext", ""),
-                  m.value("ratchet_header_enc", ""),
-                  BaseMessage::Direction::Received,
-                  epoch,
-                  seq};
-      msg.setPlaintext(std::string(plain.begin(), plain.end()));
-      store.add(std::move(msg));
+      store.add(Message{id, otherUserId, m.at("ciphertext").get<std::string>(),
+                        m.at("ratchet_header_enc").get<std::string>(),
+                        BaseMessage::Direction::Received, epoch, seq,
+                        std::string(plain.begin(), plain.end())});
     } catch (...) {
     }
   }
@@ -139,7 +222,7 @@ export void receiveDirectMessages(
 
 // Distribute our sender key to a new group member via X3DH-style encryption.
 // Returns the base64-encoded SKDM payload for that member.
-export std::string encryptSkdmForMember(ApiClient &api,
+export std::string encryptSkdmForMember(const ApiClient &api,
                                         const std::string &accessToken,
                                         int32_t memberId,
                                         const RawKeyPair &senderIk,
@@ -175,7 +258,7 @@ export std::string encryptSkdmForMember(ApiClient &api,
 }
 
 export SendResult
-sendGroupMessage(ApiClient &api, const GroupSenderKeys &senderKeys,
+sendGroupMessage(const ApiClient &api, const GroupSenderKeys &senderKeys,
                  GroupRatchetMap &groupRatchets, MessageStore &store,
                  const std::string &accessToken, int32_t groupId,
                  int32_t myUserId, const std::string &plaintext) {
@@ -190,28 +273,24 @@ sendGroupMessage(ApiClient &api, const GroupSenderKeys &senderKeys,
 
   const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto wire = ratchet.encrypt(plaintextBytes);
-  const uint32_t sentIter = (uint32_t(wire[0]) << 24) |
-                            (uint32_t(wire[1]) << 16) |
-                            (uint32_t(wire[2]) << 8) | uint32_t(wire[3]);
+  const uint32_t sentIter =
+      (static_cast<uint32_t>(wire[0]) << 24) |
+      (static_cast<uint32_t>(wire[1]) << 16) |
+      (static_cast<uint32_t>(wire[2]) << 8) | static_cast<uint32_t>(wire[3]);
 
   const auto groupInfo = api.getGroup(accessToken, groupId);
   const int32_t epoch = groupInfo.value("epoch", 0);
   const auto result =
       api.sendGroupMessage(accessToken, groupId, epoch, base64Encode(wire));
-  const int32_t msgId = result.value("id", 0);
-  GroupMessage sent{msgId,
-                    groupId,
-                    epoch,
-                    myUserId,
-                    base64Encode(wire),
-                    BaseMessage::Direction::Sent,
-                    sentIter};
-  sent.setPlaintext(plaintext);
-  store.add(std::move(sent));
+  if (!result.contains("id"))
+    throw std::runtime_error("sendGroupMessage: server response missing 'id'");
+  const int32_t msgId = result.at("id").get<int32_t>();
+  store.add(GroupMessage{msgId, groupId, epoch, myUserId, base64Encode(wire),
+                         BaseMessage::Direction::Sent, sentIter, plaintext});
   return {msgId};
 }
 
-export void receiveGroupMessages(ApiClient &api, GroupRatchetMap &groupRatchets,
+export void receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRatchets,
                                  MessageStore &store,
                                  const std::string &accessToken,
                                  int32_t groupId, int32_t myUserId) {
@@ -234,15 +313,10 @@ export void receiveGroupMessages(ApiClient &api, GroupRatchetMap &groupRatchets,
       auto &ratchet = groupRatchets.at(groupId).at(senderId);
       auto wire = base64Decode(m.value("ciphertext", ""));
       auto [plain, iter] = ratchet.decrypt(wire);
-      GroupMessage msg{id,
-                       groupId,
-                       m.value("epoch", 0),
-                       senderId,
-                       m.value("ciphertext", ""),
-                       BaseMessage::Direction::Received,
-                       iter};
-      msg.setPlaintext(std::string(plain.begin(), plain.end()));
-      store.add(std::move(msg));
+      store.add(GroupMessage{id, groupId, m.value("epoch", 0), senderId,
+                             m.value("ciphertext", ""),
+                             BaseMessage::Direction::Received, iter,
+                             std::string(plain.begin(), plain.end())});
     } catch (...) {
     }
   }

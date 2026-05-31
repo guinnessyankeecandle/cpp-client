@@ -380,13 +380,10 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
           continue;
         const auto &lu = *state.localUser;
         if (state.selectedContactId >= 0 && !state.viewingGroup) {
-          receiveDirectMessages(
-              api, state.ratchets, state.messageStore, lu.getAccessToken(),
-              lu.getId(), lu.getKeyBundle().spk,
-              lu.getKeyBundle().opks.empty()
-                  ? std::nullopt
-                  : std::make_optional(lu.getKeyBundle().opks.front()),
-              lu.getKeyBundle().pq, state.contactCache, api);
+          receiveDirectMessages(api, state.ratchets, state.messageStore,
+                                lu.getAccessToken(), lu.getKeyBundle().ik,
+                                lu.getKeyBundle().spk, lu.getKeyBundle().opks,
+                                lu.getKeyBundle().pq);
         } else if (state.viewingGroup && state.selectedGroupId >= 0) {
           receiveGroupMessages(api, state.groupRatchets, state.messageStore,
                                lu.getAccessToken(), state.selectedGroupId,
@@ -629,9 +626,11 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         try {
           receiveDirectMessages(
               api, state.ratchets, state.messageStore,
-              state.localUser->getAccessToken(), state.localUser->getId(),
-              state.localUser->getKeyBundle().spk, std::nullopt,
-              state.localUser->getKeyBundle().pq, state.contactCache, api);
+              state.localUser->getAccessToken(),
+              state.localUser->getKeyBundle().ik,
+              state.localUser->getKeyBundle().spk,
+              state.localUser->getKeyBundle().opks,
+              state.localUser->getKeyBundle().pq);
         } catch (...) {
         }
       }

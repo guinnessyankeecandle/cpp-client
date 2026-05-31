@@ -1,4 +1,5 @@
 module;
+#include <algorithm>
 #include <cstdint>
 #include <openssl/crypto.h>
 #include <optional>
@@ -32,7 +33,7 @@ export struct PqxdhInitialHeader {
   std::vector<uint8_t> senderIkXPub; // sender's X25519 IK pub (for DH1)
   std::vector<uint8_t> ephemeralPub;
   std::vector<uint8_t> pqCiphertext;
-  bool hadOpk{false};
+  std::optional<std::vector<uint8_t>> usedOpkPub; // which OPK the sender used
 };
 
 // 32 x 0xFF prefix in IKM — prevents PQXDH keys being confused with X3DH keys
@@ -79,15 +80,12 @@ export PqxdhSenderResult pqxdhSend(const RawKeyPair &senderIk,
 
 export std::vector<uint8_t>
 pqxdhReceive(const RawKeyPair &receiverIk, const RawKeyPair &receiverSpk,
-             const std::optional<RawKeyPair> &receiverOpk,
+             const std::vector<RawKeyPair> &receiverOpks,
              const RawKeyPair &receiverPq, const PqxdhInitialHeader &header) {
 
-  auto dh1 = x25519DH(receiverSpk.priv,
-                      header.senderIkXPub); // receiver SPK × sender IK
-  auto dh2 =
-      x25519DH(receiverIk.priv, header.ephemeralPub); // receiver IK × sender EK
-  auto dh3 = x25519DH(receiverSpk.priv,
-                      header.ephemeralPub); // receiver SPK × sender EK
+  auto dh1 = x25519DH(receiverSpk.priv, header.senderIkXPub);
+  auto dh2 = x25519DH(receiverIk.priv, header.ephemeralPub);
+  auto dh3 = x25519DH(receiverSpk.priv, header.ephemeralPub);
   auto pqSs = mlkemDecap(receiverPq.priv, header.pqCiphertext);
 
   std::vector<uint8_t> ikm;
@@ -95,8 +93,13 @@ pqxdhReceive(const RawKeyPair &receiverIk, const RawKeyPair &receiverSpk,
   ikm.insert(ikm.end(), dh1.begin(), dh1.end());
   ikm.insert(ikm.end(), dh2.begin(), dh2.end());
   ikm.insert(ikm.end(), dh3.begin(), dh3.end());
-  if (receiverOpk && header.hadOpk) {
-    auto dh4 = x25519DH(receiverOpk->priv, header.ephemeralPub);
+  if (header.usedOpkPub) {
+    const auto it = std::ranges::find_if(
+        receiverOpks,
+        [&](const auto &kp) { return kp.pub == *header.usedOpkPub; });
+    if (it == receiverOpks.end())
+      throw std::runtime_error("PQXDH: OPK used by sender not found in bundle");
+    auto dh4 = x25519DH(it->priv, header.ephemeralPub);
     ikm.insert(ikm.end(), dh4.begin(), dh4.end());
     OPENSSL_cleanse(dh4.data(), dh4.size());
   }

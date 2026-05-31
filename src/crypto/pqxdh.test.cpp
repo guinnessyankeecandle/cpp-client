@@ -37,10 +37,10 @@ TEST_CASE("PQXDH sender-receiver roundtrip produces identical SK", "[pqxdh]") {
   hdr.senderIkXPub = senderIk.pub;
   hdr.ephemeralPub = senderResult.ephemeralPub;
   hdr.pqCiphertext = senderResult.pqCiphertext;
-  hdr.hadOpk = false;
+  
 
   auto receiverSk =
-      pqxdhReceive(receiverIk, receiverSpk, std::nullopt, receiverPq, hdr);
+      pqxdhReceive(receiverIk, receiverSpk, {}, receiverPq, hdr);
   REQUIRE(senderResult.sessionKey == receiverSk);
 }
 
@@ -60,10 +60,10 @@ TEST_CASE("PQXDH with OPK produces identical SK", "[pqxdh]") {
   hdr.senderIkXPub = senderIk.pub;
   hdr.ephemeralPub = senderResult.ephemeralPub;
   hdr.pqCiphertext = senderResult.pqCiphertext;
-  hdr.hadOpk = true;
+  hdr.usedOpkPub = receiverOpk.pub;
 
   auto receiverSk =
-      pqxdhReceive(receiverIk, receiverSpk, receiverOpk, receiverPq, hdr);
+      pqxdhReceive(receiverIk, receiverSpk, {receiverOpk}, receiverPq, hdr);
   REQUIRE(senderResult.sessionKey == receiverSk);
 }
 
