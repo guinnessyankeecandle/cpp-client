@@ -6,13 +6,14 @@ on:
 jobs:
   debug:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build cmake clang \
-            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev qrencode libbotan-3-dev
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang git openssl curl nlohmann-json qrencode botan
       - name: Configure
         env:
           CC: clang
@@ -23,13 +24,14 @@ jobs:
 
   checksec:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build cmake checksec clang \
-            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev libbotan-3-dev
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang git openssl curl nlohmann-json qrencode botan checksec
       - name: Build hardened Release binary
         env:
           CC: clang

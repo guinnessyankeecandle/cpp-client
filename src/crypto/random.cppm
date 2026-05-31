@@ -1,7 +1,7 @@
 module;
+#include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <openssl/bio.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -29,50 +29,35 @@ export std::vector<uint8_t> randomBytes(const std::size_t numBytes) {
   return buf;
 }
 
-using BioChainPtr = OssPtr<BIO, BIO_free_all>;
-
 export std::string base64Encode(const std::span<const uint8_t> data) {
-  const auto b64 = BioChainPtr(BIO_new(BIO_f_base64()));
-  if (!b64)
-    throw std::runtime_error("BIO_new failed");
+  if (data.empty())
+    return {};
+  
+  std::string out;
+  out.resize(EVP_ENCODE_LENGTH(data.size()));
+  const int len = EVP_EncodeBlock(reinterpret_cast<uint8_t *>(out.data()),
+                                  data.data(), static_cast<int>(data.size()));
 
-  BIO *mem = BIO_new(BIO_s_mem());
-  if (!mem)
-    throw std::runtime_error("BIO_new failed");
-
-  BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
-
-  BIO_push(b64.get(), mem); // b64 chain now owns mem
-  if (!data.empty())
-    BIO_write(b64.get(), data.data(), static_cast<int>(data.size()));
-
-  BIO_flush(b64.get()); // flush all buffered data
-  const char *ptr = nullptr;
-  const long len = BIO_get_mem_data(mem, &ptr);
-  return {ptr, static_cast<std::size_t>(len)};
+  out.resize(static_cast<std::size_t>(len));
+  return out;
 }
 
 export std::vector<uint8_t> base64Decode(const std::string &encoded) {
   if (encoded.empty())
     return {};
 
-  const auto b64 = BioChainPtr(BIO_new(BIO_f_base64()));
-  if (!b64)
-    throw std::runtime_error("BIO_new failed");
+  std::vector<uint8_t> out;
+  out.resize(EVP_DECODE_LENGTH(encoded.size()));
 
-  BIO *mem = BIO_new_mem_buf(encoded.data(), static_cast<int>(encoded.size()));
-  if (!mem)
-    throw std::runtime_error("BIO_new_mem_buf failed");
-
-  BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
-
-  BIO_push(b64.get(), mem); // b64 chain now owns mem
-  std::vector<uint8_t> out(encoded.size());
-  const int len = BIO_read(b64.get(), out.data(), static_cast<int>(out.size()));
+  const int len = EVP_DecodeBlock(out.data(),
+                                  reinterpret_cast<const uint8_t *>(encoded.data()),
+                                  static_cast<int>(encoded.size()));
 
   if (len < 0)
     throw std::runtime_error("base64Decode failed");
 
-  out.resize(static_cast<std::size_t>(len));
+  // Strip padding bytes that EVP_DecodeBlock counts in its output length
+  const std::size_t padding = std::ranges::count(encoded, '=');
+  out.resize(static_cast<std::size_t>(len) - padding);
   return out;
 }

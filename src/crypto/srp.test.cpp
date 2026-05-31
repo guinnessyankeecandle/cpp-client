@@ -3,22 +3,22 @@ import securemsg.crypto.srp;
 
 TEST_CASE("SRP verifier computation does not throw", "[srp]") {
   std::string saltHex;
-  REQUIRE_NOTHROW(srpComputeVerifier("alice", "password123", saltHex));
+  REQUIRE_NOTHROW(SrpSession::computeVerifier("alice", "password123", saltHex));
   REQUIRE_FALSE(saltHex.empty());
 }
 
 TEST_CASE("SRP verifier is deterministic for given salt", "[srp]") {
   std::string salt1, salt2;
-  const auto v1 = srpComputeVerifier("alice", "password", salt1);
-  const auto v2 = srpComputeVerifier("alice", "password", salt2);
+  const auto v1 = SrpSession::computeVerifier("alice", "password", salt1);
+  const auto v2 = SrpSession::computeVerifier("alice", "password", salt2);
   REQUIRE_FALSE(v1.empty());
   REQUIRE_FALSE(v2.empty());
 }
 
 TEST_CASE("SRP different passwords produce different verifiers", "[srp]") {
   std::string s1, s2;
-  const auto v1 = srpComputeVerifier("alice", "password1", s1);
-  const auto v2 = srpComputeVerifier("alice", "password2", s2);
+  const auto v1 = SrpSession::computeVerifier("alice", "password1", s1);
+  const auto v2 = SrpSession::computeVerifier("alice", "password2", s2);
   REQUIRE(v1 != v2);
 }
 

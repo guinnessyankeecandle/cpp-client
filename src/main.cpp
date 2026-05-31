@@ -147,7 +147,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
       state.regStatus = "Computing SRP verifier...";
       std::string saltHex;
       const auto verifier =
-          srpComputeVerifier(state.regUsername, state.regPassword, saltHex);
+          SrpSession::computeVerifier(state.regUsername, state.regPassword, saltHex);
       auto res = api.registerUser(state.regUsername, saltHex, verifier);
       state.regStatus = "Registered! Scan the QR code with your authenticator.";
       if (res.contains("totp_provisioning_uri"))

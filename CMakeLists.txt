@@ -36,13 +36,10 @@ if(NOT botan_FOUND AND NOT Botan_FOUND)
         target_compile_options(Botan::Botan INTERFACE ${BOTAN_CFLAGS_OTHER})
         target_link_directories(Botan::Botan INTERFACE ${BOTAN_LIBRARY_DIRS})
     else()
-        find_library(BOTAN_LIB NAMES botan-3 botan
-            HINTS ${_botan_lib_hints}
-            REQUIRED)
+        find_library(BOTAN_LIB NAMES botan-3 botan HINTS ${_botan_lib_hints})
         find_path(BOTAN_INCLUDE_DIR botan/srp6.h
             PATH_SUFFIXES botan-3 botan
-            HINTS ${_botan_inc_hints}
-            REQUIRED)
+            HINTS ${_botan_inc_hints})
         add_library(Botan::Botan UNKNOWN IMPORTED)
         set_target_properties(Botan::Botan PROPERTIES
             IMPORTED_LOCATION "${BOTAN_LIB}"
