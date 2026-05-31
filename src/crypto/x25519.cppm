@@ -15,8 +15,8 @@ export struct X25519KeyPair {
 };
 
 export X25519KeyPair x25519Generate() {
-  using PkeyCtxPtr = OsslHandle<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
-  using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;
+  using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
+  using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
 
   auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr));
   if (!ctx)
@@ -42,8 +42,8 @@ export X25519KeyPair x25519Generate() {
 
 export std::vector<uint8_t> x25519DH(const std::vector<uint8_t> &privKey,
                                      const std::vector<uint8_t> &peerPub) {
-  using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;
-  using PkeyCtxPtr = OsslHandle<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
+  using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
+  using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
 
   auto priv = PkeyPtr(EVP_PKEY_new_raw_private_key(
       EVP_PKEY_X25519, nullptr, privKey.data(), privKey.size()));
@@ -71,7 +71,7 @@ export std::vector<uint8_t> x25519DH(const std::vector<uint8_t> &privKey,
 
 export std::vector<uint8_t>
 x25519PublicFromPrivate(const std::vector<uint8_t> &priv) {
-  using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;
+  using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
   auto pkey = PkeyPtr(EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr,
                                                    priv.data(), priv.size()));
   if (!pkey)

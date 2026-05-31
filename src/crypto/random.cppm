@@ -8,55 +8,71 @@ module;
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <vector>
 export module securemsg.crypto.random;
 
 export {
   template <typename T, auto DelFn>
-  using OsslHandle =
+  using OssPtr =
       std::unique_ptr<T, std::integral_constant<decltype(DelFn), DelFn>>;
 }
 
-export inline void sslAssert(int rc, std::string_view op) {
-  if (rc != 1)
+export inline void sslAssert(const int return_code, const char *op) {
+  if (return_code != 1)
     throw std::runtime_error(std::string(op) + " failed");
 }
 
-export std::vector<uint8_t> randomBytes(std::size_t n) {
-  std::vector<uint8_t> buf(n);
-  if (n > 0)
-    sslAssert(RAND_bytes(buf.data(), static_cast<int>(n)), "RAND_bytes");
+export std::vector<uint8_t> randomBytes(const std::size_t numBytes) {
+  std::vector<uint8_t> buf(numBytes);
+  if (numBytes > 0)
+    sslAssert(RAND_bytes(buf.data(), static_cast<int>(numBytes)), "RAND_bytes");
   return buf;
 }
 
-export std::string base64Encode(std::span<const uint8_t> data) {
-  BIO *b64raw = BIO_new(BIO_f_base64());
+using BioChainPtr = OssPtr<BIO, BIO_free_all>;
+
+export std::string base64Encode(const std::span<const uint8_t> data) {
+  const auto b64 = BioChainPtr(BIO_new(BIO_f_base64()));
+  if (!b64)
+    throw std::runtime_error("BIO_new failed");
+
   BIO *mem = BIO_new(BIO_s_mem());
-  BIO_set_flags(b64raw, BIO_FLAGS_BASE64_NO_NL);
-  BIO_push(b64raw, mem);
+  if (!mem)
+    throw std::runtime_error("BIO_new failed");
+
+  BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
+
+  BIO_push(b64.get(), mem); // b64 chain now owns mem
   if (!data.empty())
-    BIO_write(b64raw, data.data(), static_cast<int>(data.size()));
-  BIO_flush(b64raw);
+    BIO_write(b64.get(), data.data(), static_cast<int>(data.size()));
+
+  BIO_flush(b64.get()); // flush all buffered data
   const char *ptr = nullptr;
-  long len = BIO_get_mem_data(mem, &ptr);
-  std::string result(ptr, static_cast<std::size_t>(len));
-  BIO_free_all(b64raw);
-  return result;
+  const long len = BIO_get_mem_data(mem, &ptr);
+  return {ptr, static_cast<std::size_t>(len)};
 }
 
 export std::vector<uint8_t> base64Decode(const std::string &encoded) {
   if (encoded.empty())
     return {};
-  BIO *b64raw = BIO_new(BIO_f_base64());
+
+  const auto b64 = BioChainPtr(BIO_new(BIO_f_base64()));
+  if (!b64)
+    throw std::runtime_error("BIO_new failed");
+
   BIO *mem = BIO_new_mem_buf(encoded.data(), static_cast<int>(encoded.size()));
-  BIO_set_flags(b64raw, BIO_FLAGS_BASE64_NO_NL);
-  BIO_push(b64raw, mem);
+  if (!mem)
+    throw std::runtime_error("BIO_new_mem_buf failed");
+
+  BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
+
+  BIO_push(b64.get(), mem); // b64 chain now owns mem
   std::vector<uint8_t> out(encoded.size());
-  int len = BIO_read(b64raw, out.data(), static_cast<int>(out.size()));
-  BIO_free_all(b64raw);
+  const int len = BIO_read(b64.get(), out.data(), static_cast<int>(out.size()));
+
   if (len < 0)
     throw std::runtime_error("base64Decode failed");
+
   out.resize(static_cast<std::size_t>(len));
   return out;
 }

@@ -9,7 +9,7 @@ module;
 export module securemsg.crypto.kdf;
 import securemsg.crypto.random;
 
-using KdfCtxPtr = OsslHandle<EVP_KDF_CTX, EVP_KDF_CTX_free>;
+using KdfCtxPtr = OssPtr<EVP_KDF_CTX, EVP_KDF_CTX_free>;
 
 export std::vector<uint8_t> hkdf(const std::vector<uint8_t> &ikm,
                                  const std::vector<uint8_t> &salt,

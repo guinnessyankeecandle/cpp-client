@@ -8,10 +8,10 @@ export module securemsg.crypto.ed25519;
 import securemsg.crypto.random;
 
 using PkeyCtxPtr =
-    OsslHandle<EVP_PKEY_CTX,
+    OssPtr<EVP_PKEY_CTX,
                EVP_PKEY_CTX_free>; // public-private key operation context
-using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>;      // public-private key
-using MdCtxPtr = OsslHandle<EVP_MD_CTX, EVP_MD_CTX_free>; // message digest
+using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;      // public-private key
+using MdCtxPtr = OssPtr<EVP_MD_CTX, EVP_MD_CTX_free>; // message digest
 
 export constexpr int ED25519_PRIV_BYTES = 32;
 export constexpr int ED25519_PUB_BYTES = 32;

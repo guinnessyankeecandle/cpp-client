@@ -8,8 +8,8 @@ TEST_CASE("randomBytes returns correct length", "[random]") {
 }
 
 TEST_CASE("randomBytes two calls are not equal", "[random]") {
-  auto a = randomBytes(32);
-  auto b = randomBytes(32);
+  const auto a = randomBytes(32);
+  const auto b = randomBytes(32);
   REQUIRE(a != b);
 }
 
@@ -23,14 +23,14 @@ TEST_CASE("sslAssert does not throw on success", "[random]") {
 
 TEST_CASE("base64 encode-decode roundtrip", "[random]") {
   std::vector<uint8_t> data = {0x01, 0x02, 0x03, 0xAB, 0xCD};
-  auto encoded = base64Encode(data);
-  auto decoded = base64Decode(encoded);
+  const auto encoded = base64Encode(data);
+  const auto decoded = base64Decode(encoded);
   REQUIRE(decoded == data);
 }
 
 TEST_CASE("base64 empty input", "[random]") {
   std::vector<uint8_t> empty;
-  auto encoded = base64Encode(empty);
-  auto decoded = base64Decode(encoded);
+  const auto encoded = base64Encode(empty);
+  const auto decoded = base64Decode(encoded);
   REQUIRE(decoded.empty());
 }

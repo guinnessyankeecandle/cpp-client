@@ -32,12 +32,12 @@ static constexpr const char *SRP_N_HEX =
 
 static constexpr uint8_t SRP_G = 5;
 
-using BnPtr = OsslHandle<BIGNUM, BN_free>;
-using BnCtxPtr = OsslHandle<BN_CTX, BN_CTX_free>;
+using BnPtr = OssPtr<BIGNUM, BN_free>;
+using BnCtxPtr = OssPtr<BN_CTX, BN_CTX_free>;
 
 static std::vector<uint8_t> sha256Multi(
     std::initializer_list<std::pair<const uint8_t *, std::size_t>> parts) {
-  using MdCtxPtr = OsslHandle<EVP_MD_CTX, EVP_MD_CTX_free>;
+  using MdCtxPtr = OssPtr<EVP_MD_CTX, EVP_MD_CTX_free>;
   auto ctx = MdCtxPtr(EVP_MD_CTX_new());
   if (!ctx)
     throw std::runtime_error("EVP_MD_CTX_new failed");

@@ -21,9 +21,9 @@ export struct MlKemEncapResult {
 };
 
 using PkeyCtxPtr =
-    OsslHandle<EVP_PKEY_CTX,
+    OssPtr<EVP_PKEY_CTX,
                EVP_PKEY_CTX_free>; // public-private key operation context
-using PkeyPtr = OsslHandle<EVP_PKEY, EVP_PKEY_free>; // public-private key
+using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>; // public-private key
 
 export MlKemKeyPair mlkemGenerate() {
   const auto ctx =
