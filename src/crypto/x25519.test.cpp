@@ -21,12 +21,6 @@ TEST_CASE("X25519 different key pairs produce different shared secrets",
   REQUIRE(x25519DH(a.priv, b.pub) != x25519DH(a.priv, c.pub));
 }
 
-TEST_CASE("X25519 publicFromPrivate matches generated public key", "[x25519]") {
-  const auto kp = x25519Generate();
-  const auto pub = x25519PublicFromPrivate(kp.priv);
-  REQUIRE(pub == kp.pub);
-}
-
 TEST_CASE("X25519 key sizes are 32 bytes", "[x25519]") {
   const auto kp = x25519Generate();
   REQUIRE(kp.priv.size() == 32);

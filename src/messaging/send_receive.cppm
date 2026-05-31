@@ -29,9 +29,9 @@ export struct SendResult {
 
 static constexpr uint8_t PQXDH_FLAG_INITIAL = 0x01;
 static constexpr uint8_t PQXDH_FLAG_REGULAR = 0x00;
-static constexpr std::size_t PQXDH_FLAG_BYTES = 1;
+static constexpr std::ptrdiff_t PQXDH_FLAG_BYTES = 1;
 // 3× X25519_KEY_BYTES: senderIkXPub + ephemeralPub + usedOpkPub (all-zero if no OPK)
-static constexpr std::size_t PQXDH_PREFIX_BYTES =
+static constexpr std::ptrdiff_t PQXDH_PREFIX_BYTES =
     PQXDH_FLAG_BYTES + X25519_KEY_BYTES + X25519_KEY_BYTES +
     MLKEM1024_PUB_BYTES + X25519_KEY_BYTES;
 
@@ -148,68 +148,68 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
   if (!messages.is_array())
     return;
 
-  for (const auto &m : messages) {
-    if (!m.contains("id") || !m.contains("sender_id") ||
-        !m.contains("ciphertext") || !m.contains("ratchet_header_enc"))
+  for (const auto &msg : messages) {
+    if (!msg.contains("id") || !msg.contains("sender_id") ||
+        !msg.contains("ciphertext") || !msg.contains("ratchet_header_enc"))
       throw std::runtime_error(
           "receiveDirectMessages: malformed message from server");
 
-    const int32_t id = m.at("id").get<int32_t>();
-    const int32_t otherUserId = m.at("sender_id").get<int32_t>();
+    const int32_t id = msg.at("id").get<int32_t>();
+    const int32_t otherUserId = msg.at("sender_id").get<int32_t>();
 
     if (store.containsDirect(otherUserId, id))
       continue;
 
     auto rawHeader =
-        base64Decode(m.at("ratchet_header_enc").get<std::string>());
+        base64Decode(msg.at("ratchet_header_enc").get<std::string>());
     if (rawHeader.empty())
       continue;
 
     const bool isInitial = rawHeader[0] == PQXDH_FLAG_INITIAL;
 
-    if (isInitial && !ratchets.contains(otherUserId)) {
+    if (isInitial) {
       if (rawHeader.size() < PQXDH_PREFIX_BYTES)
         continue;
 
-      std::ptrdiff_t off = 1;
+      std::ptrdiff_t off = PQXDH_FLAG_BYTES;
       PqxdhInitialHeader hdr;
       hdr.senderIkXPub.assign(rawHeader.begin() + off,
                                rawHeader.begin() + off + X25519_KEY_BYTES);
       off += static_cast<std::ptrdiff_t>(X25519_KEY_BYTES);
+
       hdr.ephemeralPub.assign(rawHeader.begin() + off,
                                rawHeader.begin() + off + X25519_KEY_BYTES);
       off += static_cast<std::ptrdiff_t>(X25519_KEY_BYTES);
+
       hdr.pqCiphertext.assign(rawHeader.begin() + off,
                                rawHeader.begin() + off + MLKEM1024_PUB_BYTES);
       off += static_cast<std::ptrdiff_t>(MLKEM1024_PUB_BYTES);
 
-      std::vector<uint8_t> opkField(rawHeader.begin() + off,
+      std::vector opkField(rawHeader.begin() + off,
                                     rawHeader.begin() + off + X25519_KEY_BYTES);
-      static const std::vector<uint8_t> zeroOpk(X25519_KEY_BYTES, 0x00);
-      if (opkField != zeroOpk)
+      if (std::ranges::any_of(opkField, [](const uint8_t bit) { return bit != 0; }))
         hdr.usedOpkPub = std::move(opkField);
 
       auto sessionKey = pqxdhReceive(myIk, mySpk, myOpks, myPq, hdr);
-      ratchets.emplace(otherUserId,
-                       RatchetState::initReceiver(sessionKey, mySpk));
+      ratchets.insert_or_assign(otherUserId,
+                                RatchetState::initReceiver(sessionKey, mySpk));
       OPENSSL_cleanse(sessionKey.data(), sessionKey.size());
     } else if (!ratchets.contains(otherUserId)) {
       continue;
     }
 
     // Strip the flag byte (and PQXDH prefix if initial) to get the encrypted header
-    const std::size_t prefixLen = isInitial ? PQXDH_PREFIX_BYTES : 1;
-    std::vector<uint8_t> encHeader(
-        rawHeader.begin() + static_cast<std::ptrdiff_t>(prefixLen),
-        rawHeader.end());
+    const std::ptrdiff_t prefixLen = !isInitial ? PQXDH_FLAG_BYTES : PQXDH_PREFIX_BYTES;
+    std::vector encHeader(rawHeader.begin() + prefixLen, rawHeader.end());
 
     try {
       auto &ratchet = ratchets.at(otherUserId);
       RatchetMessage rmsg{std::move(encHeader),
-                          base64Decode(m.at("ciphertext").get<std::string>())};
+                          base64Decode(msg.at("ciphertext").get<std::string>())};
       auto [plain, epoch, seq] = ratchet.decrypt(rmsg);
-      store.add(Message{id, otherUserId, m.at("ciphertext").get<std::string>(),
-                        m.at("ratchet_header_enc").get<std::string>(),
+
+      store.add(Message{id, otherUserId, msg.at("ciphertext").get<std::string>(),
+                        msg.at("ratchet_header_enc").get<std::string>(),
                         BaseMessage::Direction::Received, epoch, seq,
                         std::string(plain.begin(), plain.end())});
     } catch (...) {
@@ -219,6 +219,36 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
 
 // ── Group messaging
 // ───────────────────────────────────────────────────────────
+
+// ── SKDM epoch tracking
+// ───────────────────────────────────────────────────────
+
+export class SkdmEpochTracker {
+public:
+  void recordPosted(const int32_t groupId, const int32_t currentEpoch) {
+    m_postedEpoch[groupId] = currentEpoch + 1;
+  }
+
+  [[nodiscard]] int32_t resolve(const int32_t groupId,
+                                const int32_t incomingEpoch) const {
+    const auto it = m_postedEpoch.find(groupId);
+    if (it == m_postedEpoch.end())
+      return incomingEpoch;
+    const int32_t myPosted = it->second;
+    if (incomingEpoch > myPosted)
+      return incomingEpoch;
+    if (incomingEpoch == myPosted)
+      return myPosted;
+    return -1;
+  }
+
+  [[nodiscard]] bool hasPosted(const int32_t groupId) const {
+    return m_postedEpoch.contains(groupId);
+  }
+
+private:
+  std::unordered_map<int32_t, int32_t> m_postedEpoch;
+};
 
 // Distribute our sender key to a new group member via X3DH-style encryption.
 // Returns the base64-encoded SKDM payload for that member.
@@ -255,6 +285,100 @@ export std::string encryptSkdmForMember(const ApiClient &api,
                  pqxdhResult.pqCiphertext.end());
   payload.insert(payload.end(), packed.begin(), packed.end());
   return base64Encode(payload);
+}
+
+// Decrypts an SKDM payload produced by encryptSkdmForMember.
+// Payload: senderIkXPub(32) + ephemeralPub(32) + pqCiphertext(1568) + packed_aead
+static std::vector<uint8_t>
+decryptSkdmPayload(const std::vector<uint8_t> &payload,
+                   const RawKeyPair &myIk, const RawKeyPair &mySpk,
+                   const std::vector<RawKeyPair> &myOpks,
+                   const RawKeyPair &myPq) {
+  constexpr std::size_t HEADER_BYTES =
+      X25519_KEY_BYTES + X25519_KEY_BYTES + MLKEM1024_PUB_BYTES;
+  if (payload.size() <= HEADER_BYTES)
+    throw std::runtime_error("SKDM payload too short");
+
+  auto off = static_cast<std::ptrdiff_t>(0);
+  PqxdhInitialHeader hdr;
+  hdr.senderIkXPub.assign(payload.begin() + off,
+                           payload.begin() + off + X25519_KEY_BYTES);
+  off += static_cast<std::ptrdiff_t>(X25519_KEY_BYTES);
+  hdr.ephemeralPub.assign(payload.begin() + off,
+                           payload.begin() + off + X25519_KEY_BYTES);
+  off += static_cast<std::ptrdiff_t>(X25519_KEY_BYTES);
+  hdr.pqCiphertext.assign(payload.begin() + off,
+                           payload.begin() + off + MLKEM1024_PUB_BYTES);
+  off += static_cast<std::ptrdiff_t>(MLKEM1024_PUB_BYTES);
+
+  auto sessionKey = pqxdhReceive(myIk, mySpk, myOpks, myPq, hdr);
+  const std::vector<uint8_t> packed(payload.begin() + off, payload.end());
+  auto senderKey = aeadDecrypt(unpackAead(packed), sessionKey);
+  OPENSSL_cleanse(sessionKey.data(), sessionKey.size());
+  return senderKey;
+}
+
+// Generate a new sender key for a group, encrypt it for all members, post it,
+// and record the epoch in the tracker.
+export void postGroupSenderKey(const ApiClient &api,
+                               const std::string &accessToken,
+                               int32_t groupId,
+                               const std::vector<int32_t> &memberIds,
+                               const RawKeyPair &myIk,
+                               GroupSenderKeys &senderKeys,
+                               SkdmEpochTracker &tracker) {
+  const auto groupInfo = api.getGroup(accessToken, groupId);
+  const int32_t epoch = groupInfo.value("epoch", 0);
+
+  auto senderKey = randomBytes(KEY_BYTES);
+  senderKeys[groupId] = senderKey;
+
+  std::map<int32_t, std::string> skdms;
+  for (const int32_t memberId : memberIds)
+    skdms[memberId] = encryptSkdmForMember(api, accessToken, memberId, myIk,
+                                           senderKey);
+  OPENSSL_cleanse(senderKey.data(), senderKey.size());
+
+  api.postSkdm(accessToken, groupId, skdms);
+  tracker.recordPosted(groupId, epoch);
+}
+
+// Fetch SKDMs for a group, resolve epoch conflicts, and init sender key ratchets.
+export void fetchAndApplySkdms(const ApiClient &api,
+                               const std::string &accessToken,
+                               int32_t groupId,
+                               const RawKeyPair &myIk,
+                               const RawKeyPair &mySpk,
+                               const std::vector<RawKeyPair> &myOpks,
+                               const RawKeyPair &myPq,
+                               GroupRatchetMap &groupRatchets,
+                               const SkdmEpochTracker &tracker) {
+  const auto skdms = api.fetchSkdm(accessToken, groupId);
+  if (!skdms.is_array())
+    return;
+
+  for (const auto &entry : skdms) {
+    if (!entry.contains("sender_id") || !entry.contains("epoch") ||
+        !entry.contains("skdm_ciphertext"))
+      continue;
+
+    const int32_t senderId = entry.at("sender_id").get<int32_t>();
+    const int32_t epoch = entry.at("epoch").get<int32_t>();
+
+    const int32_t resolvedEpoch = tracker.resolve(groupId, epoch);
+    if (resolvedEpoch < 0)
+      continue; // stale — our posted epoch wins
+
+    try {
+      const auto payload =
+          base64Decode(entry.at("skdm_ciphertext").get<std::string>());
+      auto senderKey = decryptSkdmPayload(payload, myIk, mySpk, myOpks, myPq);
+      groupRatchets[groupId][senderId] =
+          SenderKeyRatchetState::init(senderKey);
+      OPENSSL_cleanse(senderKey.data(), senderKey.size());
+    } catch (...) {
+    }
+  }
 }
 
 export SendResult
@@ -321,33 +445,3 @@ export void receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRat
     }
   }
 }
-
-// ── SKDM epoch tracking
-// ───────────────────────────────────────────────────────
-
-export class SkdmEpochTracker {
-public:
-  void recordPosted(const int32_t groupId, const int32_t currentEpoch) {
-    m_postedEpoch[groupId] = currentEpoch + 1;
-  }
-
-  [[nodiscard]] int32_t resolve(const int32_t groupId,
-                                const int32_t incomingEpoch) const {
-    const auto it = m_postedEpoch.find(groupId);
-    if (it == m_postedEpoch.end())
-      return incomingEpoch;
-    const int32_t myPosted = it->second;
-    if (incomingEpoch > myPosted)
-      return incomingEpoch;
-    if (incomingEpoch == myPosted)
-      return myPosted;
-    return -1;
-  }
-
-  [[nodiscard]] bool hasPosted(const int32_t groupId) const {
-    return m_postedEpoch.contains(groupId);
-  }
-
-private:
-  std::unordered_map<int32_t, int32_t> m_postedEpoch;
-};

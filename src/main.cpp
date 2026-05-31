@@ -38,6 +38,7 @@ struct AppState {
   RatchetMap ratchets;
   GroupRatchetMap groupRatchets;
   GroupSenderKeys groupSenderKeys;
+  SkdmEpochTracker skdmTracker;
 
   std::vector<Contact> contactCache;
   std::vector<Contact> contacts;
@@ -413,6 +414,20 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
               state.knownGroupEpochs[gid] = epoch;
               state.groups.emplace_back(gid, g.value("name", ""),
                                         std::move(members), epoch);
+
+              // Post our sender key if we don't have one for this group yet
+              if (!state.groupSenderKeys.contains(gid)) {
+                const auto &kb = lu.getKeyBundle();
+                postGroupSenderKey(api, lu.getAccessToken(), gid,
+                                   state.groups.back().getMembers(), kb.ik,
+                                   state.groupSenderKeys, state.skdmTracker);
+              }
+
+              // Fetch sender keys from other members
+              const auto &kb = lu.getKeyBundle();
+              fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ik, kb.spk,
+                                 kb.opks, kb.pq, state.groupRatchets,
+                                 state.skdmTracker);
             }
           }
         }

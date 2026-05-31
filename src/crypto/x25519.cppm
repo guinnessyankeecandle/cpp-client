@@ -45,18 +45,3 @@ export std::vector<uint8_t> x25519DH(const std::vector<uint8_t> &privKey,
             "X25519 derive");
   return shared;
 }
-
-export std::vector<uint8_t>
-x25519PublicFromPrivate(const std::vector<uint8_t> &priv) {
-  const auto key_private_ptr = PkeyPtr(EVP_PKEY_new_raw_private_key(
-      EVP_PKEY_X25519, nullptr, priv.data(), priv.size()));
-  if (!key_private_ptr)
-    throw std::runtime_error("X25519 new_raw_private_key failed");
-  std::size_t pubLen = 0;
-  EVP_PKEY_get_raw_public_key(key_private_ptr.get(), nullptr, &pubLen);
-  std::vector<uint8_t> pub(pubLen);
-  sslAssert(
-      EVP_PKEY_get_raw_public_key(key_private_ptr.get(), pub.data(), &pubLen),
-      "X25519 get_raw_public_key");
-  return pub;
-}
