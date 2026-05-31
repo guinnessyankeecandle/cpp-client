@@ -1,7 +1,9 @@
 module;
-#include <openssl/evp.h>
+#include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
+#include <openssl/evp.h>
 export module securemsg.crypto.mlkem;
 import securemsg.crypto.random;
 

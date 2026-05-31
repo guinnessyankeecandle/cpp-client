@@ -7,17 +7,47 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
-find_package(Botan 3 QUIET)
-if(NOT Botan_FOUND)
-    find_library(BOTAN_LIB NAMES botan-3 botan REQUIRED)
-    find_path(BOTAN_INCLUDE_DIR botan/srp6.h
-        PATH_SUFFIXES botan-3 botan
-        HINTS /usr/include /usr/local/include
-        REQUIRED)
-    add_library(Botan::Botan UNKNOWN IMPORTED)
-    set_target_properties(Botan::Botan PROPERTIES
-        IMPORTED_LOCATION "${BOTAN_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${BOTAN_INCLUDE_DIR}")
+set(_botan_lib_hints
+    /usr/lib64
+    /usr/lib/x86_64-linux-gnu
+    /usr/local/lib64
+    /usr/local/lib
+    /run/host/usr/lib64
+    /run/host/usr/lib/x86_64-linux-gnu)
+set(_botan_inc_hints
+    /usr/include
+    /usr/local/include
+    /run/host/usr/include)
+
+find_package(botan 3 QUIET CONFIG
+    HINTS ${_botan_lib_hints}
+    PATH_SUFFIXES cmake/Botan-3 cmake/botan-3 cmake)
+if(NOT botan_FOUND AND NOT Botan_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        set(ENV{PKG_CONFIG_PATH}
+            "/usr/lib64/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+        pkg_check_modules(BOTAN QUIET botan-3)
+    endif()
+    if(BOTAN_FOUND)
+        add_library(Botan::Botan INTERFACE IMPORTED)
+        target_link_libraries(Botan::Botan INTERFACE ${BOTAN_LIBRARIES})
+        target_include_directories(Botan::Botan INTERFACE ${BOTAN_INCLUDE_DIRS})
+        target_compile_options(Botan::Botan INTERFACE ${BOTAN_CFLAGS_OTHER})
+        target_link_directories(Botan::Botan INTERFACE ${BOTAN_LIBRARY_DIRS})
+    else()
+        find_library(BOTAN_LIB NAMES botan-3 botan
+            HINTS ${_botan_lib_hints}
+            REQUIRED)
+        find_path(BOTAN_INCLUDE_DIR botan/srp6.h
+            PATH_SUFFIXES botan-3 botan
+            HINTS ${_botan_inc_hints}
+            REQUIRED)
+        add_library(Botan::Botan UNKNOWN IMPORTED)
+        set_target_properties(Botan::Botan PROPERTIES
+            IMPORTED_LOCATION "${BOTAN_LIB}"
+            INTERFACE_INCLUDE_DIRECTORIES "${BOTAN_INCLUDE_DIR}")
+    endif()
 endif()
 
 include(FetchContent)
