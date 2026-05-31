@@ -156,7 +156,8 @@ public:
     ratchet_state.m_remotePublicKey = bobSpkPub;
     // Both parties derive the same initial header key from sk
     ratchet_state.m_headerKey = hkdf(sk, {}, "ratchet-header-key", KEY_BYTES);
-    auto [rk, cks] = kdfRk(sk, x25519DH(ratchet_state.m_sendingKeyPair.priv, bobSpkPub));
+    auto [rk, cks] =
+        kdfRk(sk, x25519DH(ratchet_state.m_sendingKeyPair.priv, bobSpkPub));
     ratchet_state.m_rootKey = std::move(rk);
     ratchet_state.m_sendChainKey = std::move(cks);
     return ratchet_state;
@@ -164,9 +165,9 @@ public:
 
   // Initialise as receiver (Bob) after PQXDH.
   static RatchetState initReceiver(const std::vector<uint8_t> &sk,
-                                   const X25519KeyPair &spk) {
+                                   const X25519KeyPair &signed_pre_key) {
     RatchetState ratchet_state;
-    ratchet_state.m_sendingKeyPair = spk;
+    ratchet_state.m_sendingKeyPair = signed_pre_key;
     ratchet_state.m_rootKey = sk;
     // Same header key as sender
     ratchet_state.m_headerKey = hkdf(sk, {}, "ratchet-header-key", KEY_BYTES);
@@ -174,6 +175,9 @@ public:
   }
 
   RatchetMessage encrypt(const std::vector<uint8_t> &plaintext) {
+    if (m_sendChainKey.empty())
+      throw std::runtime_error(
+          "Cannot encrypt before receiving a message as initialisedReceiver");
     auto [newSendChainKey, mk] = kdfCk(m_sendChainKey);
     m_sendChainKey = std::move(newSendChainKey);
 
@@ -292,11 +296,13 @@ private:
     m_recvCount = 0;
     m_remotePublicKey = newRemoteKey;
     m_dhPubToEpoch[newRemoteKey] = ++m_dhRatchetEpoch;
-    auto [intermediateRootKey, newRecvChainKey] = kdfRk(m_rootKey, x25519DH(m_sendingKeyPair.priv, newRemoteKey));
+    auto [intermediateRootKey, newRecvChainKey] =
+        kdfRk(m_rootKey, x25519DH(m_sendingKeyPair.priv, newRemoteKey));
     OPENSSL_cleanse(m_rootKey.data(), m_rootKey.size());
     OPENSSL_cleanse(m_sendingKeyPair.priv.data(), m_sendingKeyPair.priv.size());
     m_sendingKeyPair = x25519Generate();
-    auto [newRootKey, newSendChainKey] = kdfRk(intermediateRootKey, x25519DH(m_sendingKeyPair.priv, newRemoteKey));
+    auto [newRootKey, newSendChainKey] = kdfRk(
+        intermediateRootKey, x25519DH(m_sendingKeyPair.priv, newRemoteKey));
     OPENSSL_cleanse(intermediateRootKey.data(), intermediateRootKey.size());
     OPENSSL_cleanse(m_recvChainKey.data(), m_recvChainKey.size());
     OPENSSL_cleanse(m_sendChainKey.data(), m_sendChainKey.size());

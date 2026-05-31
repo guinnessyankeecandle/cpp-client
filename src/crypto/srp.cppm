@@ -1,221 +1,123 @@
 module;
 #include <cstdint>
-#include <openssl/bn.h>
 #include <openssl/crypto.h>
-#include <openssl/evp.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <botan/srp6.h>
+#include <botan/bigint.h>
+#include <botan/dl_group.h>
+#include <botan/hash.h>
+#include <botan/hex.h>
+#include <botan/auto_rng.h>
+#include <botan/symkey.h>
 export module securemsg.crypto.srp;
 import securemsg.crypto.random;
 
-static constexpr const char *SRP_N_HEX =
-    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08"
-    "8A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B"
-    "302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9"
-    "A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE6"
-    "49286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8"
-    "FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D"
-    "670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C"
-    "180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF695581718"
-    "3995497CEA956AE515D2261898FA051015728E5A8AAAC42DAD33170D"
-    "04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575D060C7D"
-    "B3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D226"
-    "1AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200C"
-    "BBE117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFC"
-    "E0FD108E4B82D120A92108011A723C12A787E6D788719A10BDBA5B26"
-    "99C327186AF4E23C1A946834B6150BDA2583E9CA2AD44CE8DBBBC2DB"
-    "04DE8EF92E8EFC141FBECAA6287C59474E6BC05D99B2964FA090C3A2"
-    "233BA186515BE7ED1F612970CEE2D7AFB81BDD762170481CD0069127"
-    "D5B05AA993B4EA988D8FDDC186FFB7DC90A6C08F4DF435C934063199"
-    "FFFFFFFFFFFFFFFF";
+static constexpr auto SRP_GROUP = "modp/srp/4096";
+static constexpr auto SRP_HASH  = "SHA-256";
 
-static constexpr uint8_t SRP_G = 5;
-
-using BnPtr = OssPtr<BIGNUM, BN_free>;
-using BnCtxPtr = OssPtr<BN_CTX, BN_CTX_free>;
-
-static std::vector<uint8_t> sha256Multi(
-    std::initializer_list<std::pair<const uint8_t *, std::size_t>> parts) {
-  using MdCtxPtr = OssPtr<EVP_MD_CTX, EVP_MD_CTX_free>;
-  auto ctx = MdCtxPtr(EVP_MD_CTX_new());
-  if (!ctx)
-    throw std::runtime_error("EVP_MD_CTX_new failed");
-  sslAssert(EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr), "DigestInit");
-  for (auto &[data, len] : parts)
-    sslAssert(EVP_DigestUpdate(ctx.get(), data, len), "DigestUpdate");
-  std::vector<uint8_t> out(32);
-  unsigned int outLen = 32;
-  sslAssert(EVP_DigestFinal_ex(ctx.get(), out.data(), &outLen), "DigestFinal");
-  return out;
+static std::vector<uint8_t> sha256(std::initializer_list<std::pair<const uint8_t *, std::size_t>> parts) {
+  const auto h = Botan::HashFunction::create_or_throw(SRP_HASH);
+  for (const auto &[data, len] : parts)
+    h->update(data, len);
+  return h->final_stdvec();
 }
 
+// Verifier generation — fully delegated to Botan.
 export std::string srpComputeVerifier(const std::string &username,
                                       const std::string &password,
                                       std::string &saltHexOut) {
-  auto saltBytes = randomBytes(32);
-  auto bnCtx = BnCtxPtr(BN_CTX_new());
-  BIGNUM *Nraw = nullptr;
-  BN_hex2bn(&Nraw, SRP_N_HEX);
-  auto N = BnPtr(Nraw);
-  auto g = BnPtr(BN_new());
-  BN_set_word(g.get(), SRP_G);
+  const auto saltBytes = randomBytes(32);
 
-  std::string credentials = username + ":" + password;
-  auto innerHash =
-      sha256Multi({{reinterpret_cast<const uint8_t *>(credentials.data()),
-                    credentials.size()}});
-  auto x_bytes = sha256Multi({{saltBytes.data(), saltBytes.size()},
-                              {innerHash.data(), innerHash.size()}});
-  auto x = BnPtr(BN_new());
-  BN_bin2bn(x_bytes.data(), static_cast<int>(x_bytes.size()), x.get());
-
-  auto v = BnPtr(BN_new());
-  BN_mod_exp(v.get(), g.get(), x.get(), N.get(), bnCtx.get());
-
+  // Pad salt to 64 bytes to match the server's expected format
   std::vector<uint8_t> saltPadded(64, 0);
   std::copy(saltBytes.begin(), saltBytes.end(), saltPadded.begin());
 
-  BIGNUM *saltBnRaw = nullptr;
-  BN_bin2bn(saltPadded.data(), static_cast<int>(saltPadded.size()), saltBnRaw);
-  // Use saltPadded directly for hex conversion
-  char *saltHex = BN_bn2hex(BN_bin2bn(
-      saltPadded.data(), static_cast<int>(saltPadded.size()), nullptr));
-  char *vHex = BN_bn2hex(v.get());
-  saltHexOut = saltHex;
-  std::string verifierHex = vHex;
-  OPENSSL_free(saltHex);
-  OPENSSL_free(vHex);
-  OPENSSL_cleanse(x_bytes.data(), x_bytes.size());
-  return verifierHex;
+  const Botan::BigInt verifier = Botan::srp6_generate_verifier(
+      username, password, saltPadded, SRP_GROUP, SRP_HASH);
+
+  saltHexOut = Botan::BigInt(saltPadded).to_hex_string();
+  return verifier.to_hex_string();
 }
 
+export struct SrpProof {
+  std::string clientPublicHex; // A — send to srpVerify
+  std::string clientProofHex;  // M1 — send to srpVerify
+};
+
+// SRP-6a client session — core key agreement delegated to Botan.
+// New two-step protocol flow:
+//   1. srpInit(username)                    → {session_id, srp_salt, server_public (B)}
+//   2. computeProof(username, password, salt, B) → SrpProof{A, M1}
+//   3. srpVerify(session_id, A, M1)         → {server_proof (M2)}
+//   4. verifyServerProof(M2)                → confirms server holds correct verifier
 export class SrpSession {
 public:
-  std::string begin(const std::string &username, const std::string &password) {
-    m_username = username;
-    m_password = password;
-    BIGNUM *Nraw = nullptr;
-    BN_hex2bn(&Nraw, SRP_N_HEX);
-    auto N = BnPtr(Nraw);
-    auto aBytes = randomBytes(32);
-    auto a = BnPtr(BN_new());
-    BN_bin2bn(aBytes.data(), static_cast<int>(aBytes.size()), a.get());
-    auto g = BnPtr(BN_new());
-    BN_set_word(g.get(), SRP_G);
-    auto A = BnPtr(BN_new());
-    auto ctx = BnCtxPtr(BN_CTX_new());
-    BN_mod_exp(A.get(), g.get(), a.get(), N.get(), ctx.get());
-    m_a_bytes.resize(static_cast<std::size_t>(BN_num_bytes(a.get())));
-    BN_bn2bin(a.get(), m_a_bytes.data());
-    m_A_bytes.resize(512);
-    BN_bn2binpad(A.get(), m_A_bytes.data(), 512);
-    char *hex = BN_bn2hex(A.get());
-    std::string result = hex;
-    OPENSSL_free(hex);
-    return result;
-  }
+  // Derives (A, K) via Botan, then computes M1. Returns A and M1 for srpVerify.
+  SrpProof computeProof(const std::string &username,
+                        const std::string &password,
+                        const std::string &srpSaltHex,
+                        const std::string &serverPublicHex) {
+    Botan::AutoSeeded_RNG rng;
 
-  std::string computeProof(const std::string &srpSaltHex,
-                           const std::string &serverPublicHex) {
-    BIGNUM *Nraw = nullptr;
-    BN_hex2bn(&Nraw, SRP_N_HEX);
-    auto N = BnPtr(Nraw);
-    auto g = BnPtr(BN_new());
-    BN_set_word(g.get(), SRP_G);
-    auto ctx = BnCtxPtr(BN_CTX_new());
+    const Botan::BigInt B   = Botan::BigInt::from_string("0x" + serverPublicHex);
+    const auto saltBytes    = Botan::hex_decode(srpSaltHex);
 
-    std::vector<uint8_t> nBytes(512);
-    BN_bn2binpad(N.get(), nBytes.data(), 512);
-    uint8_t gByte = SRP_G;
-    auto kBytes = sha256Multi({{nBytes.data(), nBytes.size()}, {&gByte, 1}});
-    auto k = BnPtr(BN_new());
-    BN_bin2bn(kBytes.data(), static_cast<int>(kBytes.size()), k.get());
+    // Botan performs the full constant-time SRP-6a client computation
+    auto [A, sessionKey]    = Botan::srp6_client_agree(
+        username, password, SRP_GROUP, SRP_HASH, saltBytes, B, rng);
 
-    BIGNUM *Braw = nullptr;
-    BN_hex2bn(&Braw, serverPublicHex.c_str());
-    auto B = BnPtr(Braw);
-    BIGNUM *saltRaw = nullptr;
-    BN_hex2bn(&saltRaw, srpSaltHex.c_str());
-    auto salt = BnPtr(saltRaw);
-    std::vector<uint8_t> saltBytes(
-        static_cast<std::size_t>(BN_num_bytes(salt.get())));
-    BN_bn2bin(salt.get(), saltBytes.data());
+    m_A = A;
+    const auto keyBits = sessionKey.bits_of();
+    m_K.assign(keyBits.begin(), keyBits.end());
 
-    std::vector<uint8_t> BPad(512);
-    BN_bn2binpad(B.get(), BPad.data(), 512);
-    auto uBytes = sha256Multi(
-        {{m_A_bytes.data(), m_A_bytes.size()}, {BPad.data(), BPad.size()}});
-    auto u = BnPtr(BN_new());
-    BN_bin2bn(uBytes.data(), static_cast<int>(uBytes.size()), u.get());
+    // M1 = SHA256(SHA256(N) XOR SHA256(g) || SHA256(username) || salt || A || B || K)
+    // Matches pysrp's non-RFC5054 M1 formula used by the server.
+    const Botan::DL_Group group(SRP_GROUP);
+    const auto nBytes   = group.get_p().serialize(512);
+    const auto gByte    = static_cast<uint8_t>(group.get_g().word_at(0));
+    const auto ABytes   = m_A.serialize(512);
+    const auto BBytes   = B.serialize(512);
 
-    std::string cred = m_username + ":" + m_password;
-    auto inner = sha256Multi(
-        {{reinterpret_cast<const uint8_t *>(cred.data()), cred.size()}});
-    auto xBytes = sha256Multi(
-        {{saltBytes.data(), saltBytes.size()}, {inner.data(), inner.size()}});
-    auto x = BnPtr(BN_new());
-    BN_bin2bn(xBytes.data(), static_cast<int>(xBytes.size()), x.get());
-
-    auto gx = BnPtr(BN_new());
-    BN_mod_exp(gx.get(), g.get(), x.get(), N.get(), ctx.get());
-    auto kgx = BnPtr(BN_new());
-    BN_mod_mul(kgx.get(), k.get(), gx.get(), N.get(), ctx.get());
-    auto base = BnPtr(BN_new());
-    BN_mod_sub(base.get(), B.get(), kgx.get(), N.get(), ctx.get());
-    auto a = BnPtr(BN_new());
-    BN_bin2bn(m_a_bytes.data(), static_cast<int>(m_a_bytes.size()), a.get());
-    auto ux = BnPtr(BN_new());
-    BN_mul(ux.get(), u.get(), x.get(), ctx.get());
-    auto exp = BnPtr(BN_new());
-    BN_add(exp.get(), a.get(), ux.get());
-    auto S = BnPtr(BN_new());
-    BN_mod_exp(S.get(), base.get(), exp.get(), N.get(), ctx.get());
-
-    std::vector<uint8_t> SBytes(512);
-    BN_bn2binpad(S.get(), SBytes.data(), 512);
-    m_K = sha256Multi({{SBytes.data(), SBytes.size()}});
-
-    auto hashN = sha256Multi({{nBytes.data(), nBytes.size()}});
-    auto hashG = sha256Multi({{&gByte, 1}});
+    const auto hashN    = sha256({{nBytes.data(), nBytes.size()}});
+    const auto hashG    = sha256({{&gByte, 1}});
     std::vector<uint8_t> xorNG(32);
-    for (int i = 0; i < 32; ++i)
+    for (std::size_t i = 0; i < 32; ++i)
       xorNG[i] = hashN[i] ^ hashG[i];
-    auto hashUser =
-        sha256Multi({{reinterpret_cast<const uint8_t *>(m_username.data()),
-                      m_username.size()}});
-    m_M1 = sha256Multi({{xorNG.data(), xorNG.size()},
-                        {hashUser.data(), hashUser.size()},
-                        {saltBytes.data(), saltBytes.size()},
-                        {m_A_bytes.data(), m_A_bytes.size()},
-                        {BPad.data(), BPad.size()},
-                        {m_K.data(), m_K.size()}});
 
-    OPENSSL_cleanse(xBytes.data(), xBytes.size());
-    BIGNUM *m1Bn =
-        BN_bin2bn(m_M1.data(), static_cast<int>(m_M1.size()), nullptr);
-    char *hex = BN_bn2hex(m1Bn);
-    BN_free(m1Bn);
-    std::string result = hex;
-    OPENSSL_free(hex);
-    return result;
+    const auto hashUser = sha256({{reinterpret_cast<const uint8_t *>(username.data()),
+                                   username.size()}});
+
+    m_M1 = sha256({
+        {xorNG.data(),     xorNG.size()},
+        {hashUser.data(),  hashUser.size()},
+        {saltBytes.data(), saltBytes.size()},
+        {ABytes.data(),    ABytes.size()},
+        {BBytes.data(),    BBytes.size()},
+        {m_K.data(),       m_K.size()},
+    });
+
+    return {m_A.to_hex_string(), Botan::BigInt(m_M1).to_hex_string()};
   }
 
+  // M2 = SHA256(A || M1 || K) — verifies the server also holds the correct verifier.
   bool verifyServerProof(const std::string &serverProofHex) const {
-    auto expected = sha256Multi({{m_A_bytes.data(), m_A_bytes.size()},
-                                 {m_M1.data(), m_M1.size()},
-                                 {m_K.data(), m_K.size()}});
-    BIGNUM *serverM2Bn = nullptr;
-    BN_hex2bn(&serverM2Bn, serverProofHex.c_str());
-    std::vector<uint8_t> serverM2(32);
-    BN_bn2binpad(serverM2Bn, serverM2.data(), 32);
-    BN_free(serverM2Bn);
+    if (m_K.empty() || m_M1.empty())
+      throw std::runtime_error("SRP: cannot verify server proof before completing handshake");
+
+    const auto ABytes   = m_A.serialize(512);
+    const auto expected = sha256({
+        {ABytes.data(), ABytes.size()},
+        {m_M1.data(),   m_M1.size()},
+        {m_K.data(),    m_K.size()},
+    });
+
+    const auto serverM2 = Botan::BigInt::from_string("0x" + serverProofHex).serialize(32);
     return CRYPTO_memcmp(expected.data(), serverM2.data(), 32) == 0;
   }
 
   ~SrpSession() {
-    if (!m_a_bytes.empty())
-      OPENSSL_cleanse(m_a_bytes.data(), m_a_bytes.size());
     if (!m_K.empty())
       OPENSSL_cleanse(m_K.data(), m_K.size());
     if (!m_M1.empty())
@@ -223,10 +125,7 @@ public:
   }
 
 private:
-  std::string m_username;
-  std::string m_password;
-  std::vector<uint8_t> m_a_bytes;
-  std::vector<uint8_t> m_A_bytes;
-  std::vector<uint8_t> m_K;
-  std::vector<uint8_t> m_M1;
+  Botan::BigInt m_A;
+  mutable std::vector<uint8_t> m_K;
+  mutable std::vector<uint8_t> m_M1;
 };

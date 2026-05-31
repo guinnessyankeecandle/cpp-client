@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get install -y ninja-build cmake clang libssl-dev libcurl4-openssl-dev nlohmann-json3-dev clang-tidy
+        run: sudo apt-get install -y ninja-build cmake clang libssl-dev libcurl4-openssl-dev nlohmann-json3-dev clang-tidy libbotan-3-dev
       - name: Configure
         env:
           CC: clang

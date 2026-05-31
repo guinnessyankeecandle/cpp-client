@@ -7,6 +7,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
+find_package(Botan 3 QUIET)
+if(NOT Botan_FOUND)
+    find_library(BOTAN_LIB NAMES botan-3 botan REQUIRED)
+    find_path(BOTAN_INCLUDE_DIR botan/srp6.h
+        PATH_SUFFIXES botan-3 botan
+        HINTS /usr/include /usr/local/include
+        REQUIRED)
+    add_library(Botan::Botan UNKNOWN IMPORTED)
+    set_target_properties(Botan::Botan PROPERTIES
+        IMPORTED_LOCATION "${BOTAN_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${BOTAN_INCLUDE_DIR}")
+endif()
 
 include(FetchContent)
 
@@ -49,7 +61,7 @@ target_sources(securemsg_crypto PUBLIC
         src/crypto/keystore.cppm
         src/crypto/srp.cppm
         src/crypto/crypto.cppm)
-target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto Botan::Botan)
 target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 
 # ── Models ────────────────────────────────────────────────────────────────────

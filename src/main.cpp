@@ -166,11 +166,10 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
     }
     try {
       SrpSession srp;
-      const auto A = srp.begin(state.regUsername, state.regPassword);
-      auto init = api.srpInit(state.regUsername, A);
-      auto verify = api.srpVerify(
-          init["session_id"],
-          srp.computeProof(init["srp_salt"], init["server_public"]));
+      auto init = api.srpInit(state.regUsername);
+      const auto [A, M1] = srp.computeProof(state.regUsername, state.regPassword,
+                                             init["srp_salt"], init["server_public"]);
+      auto verify = api.srpVerify(init["session_id"], A, M1);
       if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
         state.regTotpStatus = "Server proof invalid.";
         return;
@@ -263,11 +262,10 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
     try {
       state.loginStatus = "Authenticating...";
       SrpSession srp;
-      const auto A = srp.begin(state.loginUsername, state.loginPassword);
-      auto init = api.srpInit(state.loginUsername, A);
-      auto verify = api.srpVerify(
-          init["session_id"],
-          srp.computeProof(init["srp_salt"], init["server_public"]));
+      auto init = api.srpInit(state.loginUsername);
+      const auto [A, M1] = srp.computeProof(state.loginUsername, state.loginPassword,
+                                             init["srp_salt"], init["server_public"]);
+      auto verify = api.srpVerify(init["session_id"], A, M1);
       if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
         state.loginStatus = "ERROR: Server proof invalid -- possible MITM!";
         return;

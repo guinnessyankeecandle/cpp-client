@@ -28,7 +28,8 @@ This installs all dependencies, compiles, and launches the app. Requires `sudo` 
 | `make` | `make` | Build tool |
 | `ninja-build` | `ninja-build` | Required generator for C++20 modules |
 | `clang` | `clang` | Clang compiler (CI / coverage builds) |
-| `openssl-devel` | `libssl-dev` | All crypto: AES-GCM, Ed25519, X25519, ML-KEM-1024, HKDF, PBKDF2, SRP |
+| `openssl-devel` | `libssl-dev` | All crypto: AES-GCM, Ed25519, X25519, ML-KEM-1024, HKDF, PBKDF2 |
+| `botan3-devel` | `libbotan-3-dev` | SRP-6a verifier generation and client key agreement |
 | `libcurl-devel` | `libcurl4-openssl-dev` | HTTPS API calls |
 | `nlohmann-json-devel` | `nlohmann-json3-dev` | JSON parsing |
 | `ftxui-devel` | `libftxui-dev` | Terminal UI framework |
@@ -97,10 +98,70 @@ Press `i` on any conversation to view the contact's Ed25519 identity public key.
 
 ### Double Ratchet
 
-Provides per-message forward secrecy and break-in recovery. Ratchet headers (`ratchet_header_enc`) are encrypted to hide session state from the server.
+Provides per-message forward secrecy and break-in recovery, following the [Signal Double Ratchet specification](https://signal.org/docs/specifications/doubleratchet/). Ratchet headers (`ratchet_header_enc`) are symmetrically encrypted to hide session state from the server.
 
-- **Symmetric ratchet** — chain key advances per message; each message uses a unique key. Compromise of one message key exposes no others.
-- **DH ratchet** — root key advances when the remote party sends a new DH ratchet key. Limits the window of exposure after a key compromise.
+#### Initialisation
+
+Session key `SK` from PQXDH seeds the ratchet asymmetrically:
+
+**Alice (sender)** calls `initSender(SK, bobSpkPub)`:
+```
+[rootKey, sendChainKey] = KDF_RK(SK, DH(alice_DHs, bob_SPK))
+```
+Alice immediately has a sending chain and can encrypt her first message.
+
+**Bob (receiver)** calls `initReceiver(SK, bobSpk)`:
+```
+rootKey = SK      (no KDF_RK yet — Bob hasn't seen Alice's ephemeral DH pub)
+sendChainKey = ∅  (Bob cannot send until he receives Alice's first message)
+```
+When Bob decrypts Alice's first message, her DH public key triggers a DH ratchet step (see below). At that point Bob derives his receive chain key (matching Alice's send chain key) and a new send chain key, and the two states fully converge.
+
+#### Symmetric ratchet (per-message forward secrecy)
+
+For every message sent or received, the chain key advances via HKDF:
+```
+newChainKey  = HKDF(chainKey, info="ratchet-chain-key")
+messageKey   = HKDF(chainKey, info="ratchet-message-key")
+```
+The message key is used once for AES-256-GCM encryption, then immediately cleansed. The chain key is replaced by `newChainKey`. A compromised message key exposes only that one message — all prior and future message keys are independent.
+
+#### DH ratchet (break-in recovery)
+
+Each party embeds their current X25519 public key in every message header. When the receiver sees a new DH public key from the sender, it performs a ratchet step:
+
+```
+[intermediateRootKey, recvChainKey] = KDF_RK(rootKey, DH(my_DHs, their_new_pub))
+my_DHs = X25519.generate()   // replace sending keypair immediately
+[rootKey, sendChainKey]       = KDF_RK(intermediateRootKey, DH(my_DHs, their_new_pub))
+```
+
+Two DH operations per step (one with the old keypair, one with the new) means each ratchet step produces independent receive and send chain keys. After each step the old private key is cleansed — a later compromise cannot recover past chain keys.
+
+#### Header encryption
+
+Message headers contain the sender's DH public key and counters. Without header encryption, an observer could track which messages belong to the same ratchet epoch. Headers are encrypted with a symmetric `headerKey` derived once from `SK`:
+```
+headerKey = HKDF(SK, info="ratchet-header-key")
+```
+This key is shared between Alice and Bob and does not change, so either party can decrypt any header. The server only sees an opaque blob.
+
+#### Out-of-order messages
+
+If message `n+5` arrives before messages `n` through `n+4`, the receiver advances the chain and stores keys for the skipped indices in `MKSKIPPED`. When the late messages arrive, their keys are looked up from the stash rather than re-derived. The stash is bounded: more than 1000 skipped messages in one chain is treated as a protocol error and the stash is cleansed and discarded.
+
+Each decrypted `(dhPub, messageIndex)` pair is recorded in a replay-detection set. Entries are evicted when their DH epoch is superseded by a ratchet step, keeping the set bounded to the current chain.
+
+#### Group messaging — Sender Key ratchet
+
+Direct ratchets are O(n) for groups (one ratchet per member). For groups, a simpler **Sender Key** ratchet is used instead — each member has one sending chain shared with the whole group:
+
+```
+chainKey    = HKDF(senderKey, info="sender-key-chain-init")   // once at join
+[chainKey, messageKey] = HKDF(chainKey, ...)                   // per message
+```
+
+The sender key itself is distributed to each group member individually using the same PQXDH key agreement as direct messages, then encrypted with AES-256-GCM. When a member is removed, a new sender key is generated and redistributed to the remaining members (epoch increment), denying the removed member access to future messages.
 
 ### Security properties
 

@@ -24,7 +24,7 @@ if command -v dnf &>/dev/null; then
     install_if_missing dnf gcc-c++ cmake make ninja-build git \
         openssl-devel libcurl-devel nlohmann-json-devel \
         glibc-devel kernel-headers qrencode clang \
-        catch2-devel ftxui-devel
+        catch2-devel ftxui-devel botan3-devel
 elif command -v apt-get &>/dev/null; then
     install_if_missing apt-get g++ cmake make ninja-build git \
         libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \

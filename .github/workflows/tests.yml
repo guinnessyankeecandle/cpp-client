@@ -13,7 +13,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode
+          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan
       - name: Configure
         env:
           CC: clang
@@ -33,7 +33,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode
+          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan
       - name: Configure
         env:
           CC: clang
@@ -79,7 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode
+          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan
       - name: Configure with ${{ matrix.name }}
         env:
           CC: clang

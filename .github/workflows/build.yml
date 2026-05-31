@@ -12,7 +12,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake clang \
-            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev qrencode
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev qrencode libbotan-3-dev
       - name: Configure
         env:
           CC: clang
@@ -29,7 +29,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake checksec clang \
-            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev
+            libssl-dev libcurl4-openssl-dev nlohmann-json3-dev libbotan-3-dev
       - name: Build hardened Release binary
         env:
           CC: clang

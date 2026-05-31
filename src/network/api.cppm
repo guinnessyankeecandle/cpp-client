@@ -20,15 +20,15 @@ public:
                                           {"srp_verifier", srpVerifierHex}});
   }
 
-  nlohmann::json srpInit(const std::string &username,
-                         const std::string &clientPublicHex) const {
-    return m_http.post("/auth/srp-init", {{"username", username},
-                                          {"client_public", clientPublicHex}});
+  nlohmann::json srpInit(const std::string &username) const {
+    return m_http.post("/auth/srp-init", {{"username", username}});
   }
 
   nlohmann::json srpVerify(const std::string &sessionId,
+                           const std::string &clientPublicHex,
                            const std::string &clientProofHex) const {
     return m_http.post("/auth/srp-verify", {{"session_id", sessionId},
+                                            {"client_public", clientPublicHex},
                                             {"client_proof", clientProofHex}});
   }
 
