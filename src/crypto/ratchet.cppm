@@ -329,7 +329,8 @@ private:
     return out;
   }
 
-  [[nodiscard]] RatchetHeader decryptHeader(const std::vector<uint8_t> &hdrCt) const {
+  [[nodiscard]] RatchetHeader
+  decryptHeader(const std::vector<uint8_t> &hdrCt) const {
     const auto pkt = unpackAead(hdrCt);
     auto bytes = aeadDecrypt(pkt, m_headerKey);
 
