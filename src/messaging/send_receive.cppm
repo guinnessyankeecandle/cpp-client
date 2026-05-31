@@ -217,11 +217,8 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
   }
 }
 
-// ── Group messaging
-// ───────────────────────────────────────────────────────────
 
-// ── SKDM epoch tracking
-// ───────────────────────────────────────────────────────
+// SKDM epoch tracking
 
 export class SkdmEpochTracker {
 public:
@@ -234,21 +231,19 @@ public:
     const auto it = m_postedEpoch.find(groupId);
     if (it == m_postedEpoch.end())
       return incomingEpoch;
-    const int32_t myPosted = it->second;
-    if (incomingEpoch > myPosted)
-      return incomingEpoch;
-    if (incomingEpoch == myPosted)
-      return myPosted;
-    return -1;
-  }
 
-  [[nodiscard]] bool hasPosted(const int32_t groupId) const {
-    return m_postedEpoch.contains(groupId);
+    const int32_t myPosted = it->second;
+    if (incomingEpoch >= myPosted)
+      return incomingEpoch;
+
+    return -1; // stale — our posted epoch wins
   }
 
 private:
   std::unordered_map<int32_t, int32_t> m_postedEpoch;
 };
+
+// ── Group messaging
 
 // Distribute our sender key to a new group member via X3DH-style encryption.
 // Returns the base64-encoded SKDM payload for that member.
@@ -322,7 +317,7 @@ decryptSkdmPayload(const std::vector<uint8_t> &payload,
 // and record the epoch in the tracker.
 export void postGroupSenderKey(const ApiClient &api,
                                const std::string &accessToken,
-                               int32_t groupId,
+                               const int32_t groupId,
                                const std::vector<int32_t> &memberIds,
                                const RawKeyPair &myIk,
                                GroupSenderKeys &senderKeys,
@@ -365,8 +360,7 @@ export void fetchAndApplySkdms(const ApiClient &api,
     const int32_t senderId = entry.at("sender_id").get<int32_t>();
     const int32_t epoch = entry.at("epoch").get<int32_t>();
 
-    const int32_t resolvedEpoch = tracker.resolve(groupId, epoch);
-    if (resolvedEpoch < 0)
+    if (tracker.resolve(groupId, epoch) < 0)
       continue; // stale — our posted epoch wins
 
     try {

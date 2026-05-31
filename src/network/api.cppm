@@ -12,33 +12,34 @@ public:
   explicit ApiClient(std::string baseUrl) : m_http(std::move(baseUrl)) {}
 
   // ── Auth ─────────────────────────────────────────────────────────────────
-  nlohmann::json registerUser(const std::string &username,
-                              const std::string &srpSaltHex,
-                              const std::string &srpVerifierHex) const {
+  [[nodiscard]] nlohmann::json
+  registerUser(const std::string &username, const std::string &srpSaltHex,
+               const std::string &srpVerifierHex) const {
     return m_http.post("/auth/register", {{"username", username},
                                           {"srp_salt", srpSaltHex},
                                           {"srp_verifier", srpVerifierHex}});
   }
 
-  nlohmann::json srpInit(const std::string &username) const {
+  [[nodiscard]] nlohmann::json srpInit(const std::string &username) const {
     return m_http.post("/auth/srp-init", {{"username", username}});
   }
 
-  nlohmann::json srpVerify(const std::string &sessionId,
-                           const std::string &clientPublicHex,
-                           const std::string &clientProofHex) const {
+  [[nodiscard]] nlohmann::json
+  srpVerify(const std::string &sessionId, const std::string &clientPublicHex,
+            const std::string &clientProofHex) const {
     return m_http.post("/auth/srp-verify", {{"session_id", sessionId},
                                             {"client_public", clientPublicHex},
                                             {"client_proof", clientProofHex}});
   }
 
-  nlohmann::json verify2FA(const std::string &preAuthToken,
-                           const std::string &totpCode) const {
+  [[nodiscard]] nlohmann::json verify2FA(const std::string &preAuthToken,
+                                         const std::string &totpCode) const {
     return m_http.post("/auth/verify-2fa", {{"totp_code", totpCode},
                                             {"pre_auth_token", preAuthToken}});
   }
 
-  nlohmann::json refreshTokens(const std::string &refreshToken) const {
+  [[nodiscard]] nlohmann::json
+  refreshTokens(const std::string &refreshToken) const {
     return m_http.post("/auth/refresh", {{"refresh_token", refreshToken}});
   }
 
@@ -74,26 +75,28 @@ public:
                       accessToken);
   }
 
-  nlohmann::json getPrekeysCount(const std::string &accessToken) const {
+  [[nodiscard]] nlohmann::json
+  getPrekeysCount(const std::string &accessToken) const {
     return m_http.get("/keys/prekeys/count", accessToken);
   }
 
-  nlohmann::json lookupByUsername(const std::string &accessToken,
-                                  const std::string &username) const {
+  [[nodiscard]] nlohmann::json
+  lookupByUsername(const std::string &accessToken,
+                   const std::string &username) const {
     return m_http.get("/keys/lookup/by-username?username=" + username,
                       accessToken);
   }
 
-  nlohmann::json getKeyBundle(const std::string &accessToken,
-                              const int32_t userId) const {
+  [[nodiscard]] nlohmann::json getKeyBundle(const std::string &accessToken,
+                                            const int32_t userId) const {
     return m_http.get("/keys/" + std::to_string(userId), accessToken);
   }
 
   // ── Messages ─────────────────────────────────────────────────────────────
-  nlohmann::json sendMessage(const std::string &accessToken,
-                             const int32_t recipientId,
-                             const std::string &ciphertextB64,
-                             const std::string &ratchetHeaderEncB64) const {
+  [[nodiscard]] nlohmann::json
+  sendMessage(const std::string &accessToken, const int32_t recipientId,
+              const std::string &ciphertextB64,
+              const std::string &ratchetHeaderEncB64) const {
     return m_http.post("/messages/",
                        {{"recipient_id", recipientId},
                         {"ciphertext", ciphertextB64},
@@ -101,7 +104,8 @@ public:
                        accessToken);
   }
 
-  nlohmann::json listMessages(const std::string &accessToken) const {
+  [[nodiscard]] nlohmann::json
+  listMessages(const std::string &accessToken) const {
     return m_http.get("/messages/", accessToken);
   }
 
@@ -118,11 +122,12 @@ public:
   }
 
   // ── Groups ────────────────────────────────────────────────────────────────
-  nlohmann::json listGroups(const std::string &accessToken) const {
+  [[nodiscard]] nlohmann::json
+  listGroups(const std::string &accessToken) const {
     return m_http.get("/groups/", accessToken);
   }
 
-  nlohmann::json
+  [[nodiscard]] nlohmann::json
   createGroup(const std::string &accessToken, const std::string &name,
               const std::map<int32_t, std::string> &initialMembers) const {
     nlohmann::json members;
@@ -133,8 +138,8 @@ public:
                        accessToken);
   }
 
-  nlohmann::json getGroup(const std::string &accessToken,
-                          const int32_t groupId) const {
+  [[nodiscard]] nlohmann::json getGroup(const std::string &accessToken,
+                                        const int32_t groupId) const {
     return m_http.get("/groups/" + std::to_string(groupId), accessToken);
   }
 
@@ -163,16 +168,17 @@ public:
                      body.empty() ? nullptr : body, accessToken);
   }
 
-  nlohmann::json sendGroupMessage(const std::string &accessToken,
-                                  const int32_t groupId, const int32_t epoch,
-                                  const std::string &ciphertextB64) const {
+  [[nodiscard]] nlohmann::json
+  sendGroupMessage(const std::string &accessToken, const int32_t groupId,
+                   const int32_t epoch,
+                   const std::string &ciphertextB64) const {
     return m_http.post("/groups/" + std::to_string(groupId) + "/messages",
                        {{"epoch", epoch}, {"ciphertext", ciphertextB64}},
                        accessToken);
   }
 
-  nlohmann::json listGroupMessages(const std::string &accessToken,
-                                   const int32_t groupId) const {
+  [[nodiscard]] nlohmann::json listGroupMessages(const std::string &accessToken,
+                                                 const int32_t groupId) const {
     return m_http.get("/groups/" + std::to_string(groupId) + "/messages",
                       accessToken);
   }
@@ -201,8 +207,8 @@ public:
                       {{"skdm_ciphertexts", cts}}, accessToken);
   }
 
-  nlohmann::json fetchSkdm(const std::string &accessToken,
-                           const int32_t groupId) const {
+  [[nodiscard]] nlohmann::json fetchSkdm(const std::string &accessToken,
+                                         const int32_t groupId) const {
     return m_http.get("/groups/" + std::to_string(groupId) + "/skdm",
                       accessToken);
   }
