@@ -105,9 +105,9 @@ export KeyBundle keystoreLoad(const std::string &path,
   // clean memory
   OPENSSL_cleanse(encKey.data(), encKey.size());
 
-  std::size_t off = 0;
-  auto read = [&](const std::size_t numBytes) {
-    if (off + numBytes > payload.size())
+  std::ptrdiff_t off = 0;
+  auto read = [&](const std::ptrdiff_t numBytes) {
+    if (off + numBytes > static_cast<std::ptrdiff_t>(payload.size()))
       throw std::runtime_error("Key file truncated");
     std::vector v(payload.begin() + off, payload.begin() + off + numBytes);
     off += numBytes;

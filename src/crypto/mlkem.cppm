@@ -9,8 +9,6 @@ import securemsg.crypto.random;
 
 export constexpr int MLKEM1024_PUB_BYTES = 1568;  // FIPS 203 encapsulation key
 export constexpr int MLKEM1024_PRIV_BYTES = 3168; // FIPS 203 decapsulation key
-export constexpr int MLKEM1024_CT_BYTES = 1568;
-export constexpr int MLKEM1024_SS_BYTES = 32;
 
 export struct MlKemEncapResult {
   std::vector<uint8_t> ciphertext;

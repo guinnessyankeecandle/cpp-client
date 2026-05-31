@@ -7,7 +7,7 @@ module;
 export module securemsg.crypto.x25519;
 import securemsg.crypto.random;
 
-export constexpr int X25519_KEY_BYTES = 32;
+export constexpr std::size_t X25519_KEY_BYTES = 32;
 
 using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
 using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
@@ -52,8 +52,9 @@ x25519PublicFromPrivate(const std::vector<uint8_t> &priv) {
       EVP_PKEY_X25519, nullptr, priv.data(), priv.size()));
   if (!key_private_ptr)
     throw std::runtime_error("X25519 new_raw_private_key failed");
-  std::vector<uint8_t> pub(X25519_KEY_BYTES);
-  auto pubLen = pub.size();
+  std::size_t pubLen = 0;
+  EVP_PKEY_get_raw_public_key(key_private_ptr.get(), nullptr, &pubLen);
+  std::vector<uint8_t> pub(pubLen);
   sslAssert(EVP_PKEY_get_raw_public_key(key_private_ptr.get(), pub.data(), &pubLen),
             "X25519 get_raw_public_key");
   return pub;

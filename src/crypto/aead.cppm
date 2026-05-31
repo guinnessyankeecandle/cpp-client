@@ -15,9 +15,9 @@ export struct AeadPacket {
   std::vector<uint8_t> ciphertext;
 };
 
-export constexpr int IV_BYTES = 12;
-export constexpr int TAG_BYTES = 16;
-export constexpr int KEY_BYTES = 32;
+export constexpr std::size_t IV_BYTES = 12;
+export constexpr std::size_t TAG_BYTES = 16;
+export constexpr std::size_t KEY_BYTES = 32;
 
 using CipherCtxPtr = OssPtr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
 
@@ -65,8 +65,7 @@ export std::vector<uint8_t> aeadDecrypt(const AeadPacket &pkt,
   if (key.size() != KEY_BYTES)
     throw std::runtime_error("aeadDecrypt: invalid key size");
 
-  if (static_cast<int>(pkt.iv.size()) != IV_BYTES ||
-      static_cast<int>(pkt.tag.size()) != TAG_BYTES)
+  if (pkt.iv.size() != IV_BYTES || pkt.tag.size() != TAG_BYTES)
     throw std::runtime_error("Invalid AEAD packet");
 
   const auto ctx = CipherCtxPtr(EVP_CIPHER_CTX_new());
@@ -108,7 +107,7 @@ export std::vector<uint8_t> packAead(const AeadPacket &pkt) {
 }
 
 export AeadPacket unpackAead(const std::vector<uint8_t> &raw) {
-  if (raw.size() < static_cast<std::size_t>(IV_BYTES + TAG_BYTES))
+  if (raw.size() < IV_BYTES + TAG_BYTES)
     throw std::runtime_error("AEAD packet too short");
   AeadPacket pkt;
   pkt.iv.assign(raw.begin(), raw.begin() + IV_BYTES);

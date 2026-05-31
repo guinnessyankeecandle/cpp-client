@@ -38,16 +38,13 @@ export std::vector<uint8_t> ed25519Sign(const std::vector<uint8_t> &privKey,
                                private_key_object.get()),
             "Ed25519 DigestSignInit");
 
-  std::size_t sigLen = ED25519_SIG_BYTES;
+  std::size_t sigLen = 0;
+  EVP_DigestSign(ctx.get(), nullptr, &sigLen, message.data(), message.size());
   std::vector<uint8_t> sig(sigLen);
 
-  // sign message
   sslAssert(EVP_DigestSign(ctx.get(), sig.data(), &sigLen, message.data(),
                            message.size()),
             "Ed25519 DigestSign");
-
-  // some schemes could requre a different size
-  sig.resize(sigLen);
   return sig;
 }
 

@@ -19,8 +19,7 @@ static constexpr uint32_t RATCHET_MAX_SKIP = 1000;
 // header: X25519 pub + prevChainLen (4 bytes) + messageIndex (4 bytes)
 static constexpr std::size_t HEADER_COUNTER_BYTES =
     sizeof(uint32_t) * 2; // prevChainLen + messageIndex
-static constexpr std::size_t HEADER_BYTES =
-    static_cast<std::size_t>(X25519_KEY_BYTES) + HEADER_COUNTER_BYTES;
+static constexpr std::size_t HEADER_BYTES = X25519_KEY_BYTES + HEADER_COUNTER_BYTES;
 
 export struct RatchetHeader {
   std::vector<uint8_t> dhPub;
