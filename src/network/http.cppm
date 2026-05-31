@@ -31,25 +31,27 @@ public:
       throw std::runtime_error("curl_easy_init failed");
   }
 
-  nlohmann::json post(const std::string &path, const nlohmann::json &body,
-                      const std::string &accessToken = "") const {
+  [[nodiscard]] nlohmann::json post(const std::string &path,
+                                    const nlohmann::json &body,
+                                    const std::string &accessToken = "") const {
     return request("POST", path, body.dump(), accessToken);
   }
 
-  nlohmann::json get(const std::string &path,
-                     const std::string &accessToken = "") const {
+  [[nodiscard]] nlohmann::json get(const std::string &path,
+                                   const std::string &accessToken = "") const {
     return request("GET", path, "", accessToken);
   }
 
-  nlohmann::json del(const std::string &path,
-                     const nlohmann::json &body = nullptr,
-                     const std::string &accessToken = "") const {
+  [[nodiscard]] nlohmann::json del(const std::string &path,
+                                   const nlohmann::json &body = nullptr,
+                                   const std::string &accessToken = "") const {
     return request("DELETE", path, body.is_null() ? "" : body.dump(),
                    accessToken);
   }
 
-  nlohmann::json postEmpty(const std::string &path,
-                           const std::string &accessToken = "") const {
+  [[nodiscard]] nlohmann::json
+  postEmpty(const std::string &path,
+            const std::string &accessToken = "") const {
     return request("POST", path, "", accessToken);
   }
 
@@ -62,9 +64,10 @@ private:
   CurlPtr m_curl;
   std::function<void(int)> m_retryAfterCb = [](int) {};
 
-  nlohmann::json request(const std::string &method, const std::string &path,
-                         const std::string &bodyStr,
-                         const std::string &accessToken) const {
+  [[nodiscard]] nlohmann::json request(const std::string &method,
+                                       const std::string &path,
+                                       const std::string &bodyStr,
+                                       const std::string &accessToken) const {
     const std::string url = m_baseUrl + "/api/v1" + path;
     std::string responseBody;
     long responseCode = 0;

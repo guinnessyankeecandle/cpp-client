@@ -39,7 +39,7 @@ TEST_CASE("LocalUser token setters", "[local_user]") {
 
 TEST_CASE("LocalUser wrong password throws on load", "[local_user]") {
   std::filesystem::remove(TEST_KEY_PATH);
-  LocalUser correct{1, "alice", "acc", "ref", TEST_KEY_PATH, "correct"};
+  const LocalUser correct{1, "alice", "acc", "ref", TEST_KEY_PATH, "correct"};
   (void)correct;
   REQUIRE_THROWS_AS(
       (LocalUser{1, "alice", "acc", "ref", TEST_KEY_PATH, "wrong"}),
