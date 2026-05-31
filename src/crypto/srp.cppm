@@ -1,11 +1,11 @@
 module;
+#include <algorithm>
 #include <botan/auto_rng.h>
 #include <botan/bigint.h>
 #include <botan/dl_group.h>
 #include <botan/hex.h>
 #include <botan/srp6.h>
 #include <botan/symkey.h>
-#include <algorithm>
 #include <cstdint>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -29,10 +29,9 @@ public:
                                      const std::string &password,
                                      std::string &saltHexOut) {
     const auto saltBytes = randomBytes(KEY_BYTES);
-    
+
     const Botan::BigInt verifier = Botan::srp6_generate_verifier(
         username, password, saltBytes, SRP_GROUP, SRP_HASH);
-
 
     saltHexOut = Botan::BigInt(saltBytes).to_hex_string();
     return verifier.to_hex_string();
@@ -44,7 +43,8 @@ public:
                         const std::string &serverPublicHex) {
     Botan::AutoSeeded_RNG rng;
 
-    const Botan::BigInt serverPublic = Botan::BigInt::from_string("0x" + serverPublicHex);
+    const Botan::BigInt serverPublic =
+        Botan::BigInt::from_string("0x" + serverPublicHex);
     const auto saltBytes = Botan::hex_decode(srpSaltHex);
 
     auto [clientPublic, sessionKey] = Botan::srp6_client_agree(
@@ -62,8 +62,10 @@ public:
     const auto clientPublicBytes = m_clientPublic.serialize(SRP_FIELD_BYTES);
     const auto serverPublicBytes = serverPublic.serialize(SRP_FIELD_BYTES);
 
-    const auto hashModulus = sha256({{modulusBytes.data(), modulusBytes.size()}});
-    const auto hashGenerator = sha256({{&generatorByte, sizeof(generatorByte)}});
+    const auto hashModulus =
+        sha256({{modulusBytes.data(), modulusBytes.size()}});
+    const auto hashGenerator =
+        sha256({{&generatorByte, sizeof(generatorByte)}});
     std::vector<uint8_t> xorNG(KEY_BYTES);
     for (std::size_t i = 0; i < KEY_BYTES; ++i)
       xorNG[i] = hashModulus[i] ^ hashGenerator[i];
@@ -98,7 +100,8 @@ public:
 
     const auto serverProofBytes =
         Botan::BigInt::from_string("0x" + serverProofHex).serialize(KEY_BYTES);
-    return CRYPTO_memcmp(expected.data(), serverProofBytes.data(), KEY_BYTES) == 0;
+    return CRYPTO_memcmp(expected.data(), serverProofBytes.data(), KEY_BYTES) ==
+           0;
   }
 
   ~SrpSession() {
@@ -111,9 +114,10 @@ public:
 private:
   static constexpr auto SRP_GROUP = "modp/srp/4096";
   static constexpr auto SRP_HASH = "SHA-256";
-  static constexpr std::size_t SRP_FIELD_BYTES = 512; // 4096-bit group → 512 bytes
+  static constexpr std::size_t SRP_FIELD_BYTES =
+      512; // 4096-bit group → 512 bytes
 
-  // Streams parts directly into the hash state — avoids allocating a concatenated buffer.
+  // Avoids allocating a concatenated buffer.
   static std::vector<uint8_t>
   sha256(std::initializer_list<std::pair<const uint8_t *, std::size_t>> parts) {
     const MdCtxPtr ctx(EVP_MD_CTX_new());

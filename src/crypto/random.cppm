@@ -32,7 +32,7 @@ export std::vector<uint8_t> randomBytes(const std::size_t numBytes) {
 export std::string base64Encode(const std::span<const uint8_t> data) {
   if (data.empty())
     return {};
-  
+
   std::string out;
   out.resize(EVP_ENCODE_LENGTH(data.size()));
   const int len = EVP_EncodeBlock(reinterpret_cast<uint8_t *>(out.data()),
@@ -49,9 +49,9 @@ export std::vector<uint8_t> base64Decode(const std::string &encoded) {
   std::vector<uint8_t> out;
   out.resize(EVP_DECODE_LENGTH(encoded.size()));
 
-  const int len = EVP_DecodeBlock(out.data(),
-                                  reinterpret_cast<const uint8_t *>(encoded.data()),
-                                  static_cast<int>(encoded.size()));
+  const int len = EVP_DecodeBlock(
+      out.data(), reinterpret_cast<const uint8_t *>(encoded.data()),
+      static_cast<int>(encoded.size()));
 
   if (len < 0)
     throw std::runtime_error("base64Decode failed");

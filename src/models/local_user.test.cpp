@@ -46,3 +46,23 @@ TEST_CASE("LocalUser wrong password throws on load", "[local_user]") {
       std::runtime_error);
   std::filesystem::remove(TEST_KEY_PATH);
 }
+
+TEST_CASE("LocalUser replenishOneTimePrekeys returns correct count",
+          "[local_user]") {
+  std::filesystem::remove(TEST_KEY_PATH);
+  LocalUser u{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
+  const auto pubs = u.replenishOneTimePrekeys(5, "pass");
+  REQUIRE(pubs.size() == 5);
+  for (const auto &pub : pubs)
+    REQUIRE(pub.size() == 32);
+  std::filesystem::remove(TEST_KEY_PATH);
+}
+
+TEST_CASE("LocalUser replenishOneTimePrekeys persists keys", "[local_user]") {
+  std::filesystem::remove(TEST_KEY_PATH);
+  LocalUser u{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
+  const std::size_t before = u.getKeyBundle().opks.size();
+  u.replenishOneTimePrekeys(3, "pass");
+  REQUIRE(u.getKeyBundle().opks.size() == before + 3);
+  std::filesystem::remove(TEST_KEY_PATH);
+}

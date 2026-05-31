@@ -18,7 +18,7 @@ export X25519KeyPair x25519Generate() {
   using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
   using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
 
-  auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr));
+  const auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr));
   if (!ctx)
     throw std::runtime_error("EVP_PKEY_CTX_new_id X25519 failed");
   sslAssert(EVP_PKEY_keygen_init(ctx.get()), "X25519 keygen_init");
@@ -45,17 +45,17 @@ export std::vector<uint8_t> x25519DH(const std::vector<uint8_t> &privKey,
   using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
   using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
 
-  auto priv = PkeyPtr(EVP_PKEY_new_raw_private_key(
+  const auto priv = PkeyPtr(EVP_PKEY_new_raw_private_key(
       EVP_PKEY_X25519, nullptr, privKey.data(), privKey.size()));
   if (!priv)
     throw std::runtime_error("X25519 new_raw_private_key failed");
 
-  auto peer = PkeyPtr(EVP_PKEY_new_raw_public_key(
+  const auto peer = PkeyPtr(EVP_PKEY_new_raw_public_key(
       EVP_PKEY_X25519, nullptr, peerPub.data(), peerPub.size()));
   if (!peer)
     throw std::runtime_error("X25519 new_raw_public_key failed");
 
-  auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new(priv.get(), nullptr));
+  const auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new(priv.get(), nullptr));
   if (!ctx)
     throw std::runtime_error("EVP_PKEY_CTX_new failed");
   sslAssert(EVP_PKEY_derive_init(ctx.get()), "X25519 derive_init");
@@ -72,8 +72,8 @@ export std::vector<uint8_t> x25519DH(const std::vector<uint8_t> &privKey,
 export std::vector<uint8_t>
 x25519PublicFromPrivate(const std::vector<uint8_t> &priv) {
   using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
-  auto pkey = PkeyPtr(EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr,
-                                                   priv.data(), priv.size()));
+  const auto pkey = PkeyPtr(EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr,
+                                                         priv.data(), priv.size()));
   if (!pkey)
     throw std::runtime_error("X25519 new_raw_private_key failed");
   std::vector<uint8_t> pub(X25519_KEY_BYTES);

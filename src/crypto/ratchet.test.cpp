@@ -106,3 +106,27 @@ TEST_CASE("SenderKeyRatchet duplicate message throws", "[ratchet]") {
   bob.decrypt(wire);
   REQUIRE_THROWS_AS(bob.decrypt(wire), std::runtime_error);
 }
+
+TEST_CASE("SenderKeyRatchet too many skipped messages throws", "[ratchet]") {
+  const auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob = SenderKeyRatchetState::init(sk);
+  std::vector<std::vector<uint8_t>> msgs;
+  for (int i = 0; i <= 1001; ++i)
+    msgs.push_back(alice.encrypt({static_cast<uint8_t>(i)}));
+  REQUIRE_THROWS_AS(bob.decrypt(msgs.back()), std::runtime_error);
+}
+
+TEST_CASE("Ratchet receiver cannot encrypt before first decrypt", "[ratchet]") {
+  const auto sk = randomBytes(32);
+  const auto bobSpk = x25519Generate();
+  auto bob = RatchetState::initReceiver(sk, bobSpk);
+  REQUIRE_THROWS_AS(bob.encrypt({1}), std::runtime_error);
+}
+
+TEST_CASE("Ratchet replayed message throws", "[ratchet]") {
+  auto [alice, bob] = makeAliceBob();
+  const auto msg = alice.encrypt({0xDE});
+  bob.decrypt(msg);
+  REQUIRE_THROWS_AS(bob.decrypt(msg), std::runtime_error);
+}
