@@ -6,18 +6,18 @@ import securemsg.crypto.x25519;
 
 TEST_CASE("Direct message ratchet encrypt-decrypt roundtrip",
           "[send_receive]") {
-  auto sk = randomBytes(32);
-  auto spk = x25519Generate();
+  const auto sk = randomBytes(32);
+  const auto spk = x25519Generate();
   auto alice = RatchetState::initSender(sk, spk.pub);
   auto bob = RatchetState::initReceiver(sk, spk);
-  std::vector<uint8_t> plain = {'h', 'e', 'l', 'l', 'o'};
-  auto msg = alice.encrypt(plain);
+  const std::vector<uint8_t> plain = {'h', 'e', 'l', 'l', 'o'};
+  const auto msg = alice.encrypt(plain);
   REQUIRE(bob.decrypt(msg).plaintext == plain);
 }
 
 TEST_CASE("Multiple direct messages decrypt in order", "[send_receive]") {
-  auto sk = randomBytes(32);
-  auto spk = x25519Generate();
+  const auto sk = randomBytes(32);
+  const auto spk = x25519Generate();
   auto alice = RatchetState::initSender(sk, spk.pub);
   auto bob = RatchetState::initReceiver(sk, spk);
   for (uint8_t i = 0; i < 10; ++i) {
@@ -27,8 +27,8 @@ TEST_CASE("Multiple direct messages decrypt in order", "[send_receive]") {
 }
 
 TEST_CASE("Bidirectional ratchet exchange", "[send_receive]") {
-  auto sk = randomBytes(32);
-  auto spk = x25519Generate();
+  const auto sk = randomBytes(32);
+  const auto spk = x25519Generate();
   auto alice = RatchetState::initSender(sk, spk.pub);
   auto bob = RatchetState::initReceiver(sk, spk);
   REQUIRE(bob.decrypt(alice.encrypt({0xAA})).plaintext ==
@@ -59,13 +59,13 @@ TEST_CASE("SkdmEpochTracker newer epoch: use theirs", "[send_receive]") {
 }
 
 TEST_CASE("SkdmEpochTracker no prior post: passthrough", "[send_receive]") {
-  SkdmEpochTracker tracker;
+  const SkdmEpochTracker tracker;
   REQUIRE(tracker.resolve(99, 7) == 7);
 }
 
 TEST_CASE("SkdmEpochTracker hasPosted returns false before recording",
           "[send_receive]") {
-  SkdmEpochTracker tracker;
+  const SkdmEpochTracker tracker;
   REQUIRE_FALSE(tracker.hasPosted(1));
   REQUIRE_FALSE(tracker.hasPosted(99));
 }

@@ -2,7 +2,7 @@
 import securemsg.messaging.message;
 
 TEST_CASE("Message construction and getters", "[message]") {
-  const Message m{1, 2, "ct", "hdr", Message::Direction::Received};
+  const Message m{1, 2, "ct", "hdr", Message::Direction::Received, 0, 0, ""};
   REQUIRE(m.getId() == 1);
   REQUIRE(m.getUserId() == 2);
   REQUIRE(m.getCiphertext() == "ct");
@@ -11,9 +11,8 @@ TEST_CASE("Message construction and getters", "[message]") {
   REQUIRE(m.getPlaintext().empty());
 }
 
-TEST_CASE("Message setPlaintext", "[message]") {
-  Message m{1, 2, "ct", "hdr", Message::Direction::Sent};
-  m.setPlaintext("hello");
+TEST_CASE("Message plaintext via constructor", "[message]") {
+  const Message m{1, 2, "ct", "hdr", Message::Direction::Sent, 0, 0, "hello"};
   REQUIRE(m.getPlaintext() == "hello");
 }
 
@@ -22,7 +21,7 @@ TEST_CASE("Message Direction enum values distinct", "[message]") {
 }
 
 TEST_CASE("GroupMessage construction and getters", "[message]") {
-  const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received};
+  const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received, 0, ""};
   REQUIRE(gm.getId() == 1);
   REQUIRE(gm.getGroupId() == 10);
   REQUIRE(gm.getChainEpoch() == 2);
@@ -31,8 +30,8 @@ TEST_CASE("GroupMessage construction and getters", "[message]") {
   REQUIRE(gm.getPlaintext().empty());
 }
 
-TEST_CASE("GroupMessage setPlaintext", "[message]") {
-  GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received};
-  gm.setPlaintext("hello group");
+TEST_CASE("GroupMessage plaintext via constructor", "[message]") {
+  const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received, 0,
+                        "hello group"};
   REQUIRE(gm.getPlaintext() == "hello group");
 }

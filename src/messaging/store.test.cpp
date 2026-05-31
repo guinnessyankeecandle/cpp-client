@@ -4,12 +4,12 @@ import securemsg.messaging.message;
 
 static Message makeMsg(const int32_t id, const int32_t userId = 1,
                        const uint32_t seq = 0) {
-  return {id, userId, "ct", "hdr", BaseMessage::Direction::Received, 0, seq};
+  return {id, userId, "ct", "hdr", BaseMessage::Direction::Received, 0, seq, ""};
 }
 
 static GroupMessage makeGrpMsg(const int32_t id, const int32_t groupId = 10,
                                const uint32_t seq = 0) {
-  return {id, groupId, 0, 2, "ct", BaseMessage::Direction::Received, seq};
+  return {id, groupId, 0, 2, "ct", BaseMessage::Direction::Received, seq, ""};
 }
 
 TEST_CASE("MessageStore add direct and retrieve by user", "[store]") {
