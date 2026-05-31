@@ -19,7 +19,7 @@ export constexpr int IV_BYTES = 12;
 export constexpr int TAG_BYTES = 16;
 export constexpr int KEY_BYTES = 32;
 
-using CipherCtxPtr = OsslHandle<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
+using CipherCtxPtr = OssPtr<EVP_CIPHER_CTX, EVP_CIPHER_CTX_free>;
 
 export AeadPacket aeadEncrypt(const std::vector<uint8_t> &plaintext,
                               const std::vector<uint8_t> &key) {
