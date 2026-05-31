@@ -639,13 +639,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       state.messageStore.clear();
       if (state.localUser) {
         try {
-          receiveDirectMessages(
-              api, state.ratchets, state.messageStore,
-              state.localUser->getAccessToken(),
-              state.localUser->getKeyBundle().ik,
-              state.localUser->getKeyBundle().spk,
-              state.localUser->getKeyBundle().opks,
-              state.localUser->getKeyBundle().pq);
+          receiveDirectMessages(api, state.ratchets, state.messageStore,
+                                state.localUser->getAccessToken(),
+                                state.localUser->getKeyBundle().ik,
+                                state.localUser->getKeyBundle().spk,
+                                state.localUser->getKeyBundle().opks,
+                                state.localUser->getKeyBundle().pq);
         } catch (...) {
         }
       }

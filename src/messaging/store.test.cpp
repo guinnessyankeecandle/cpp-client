@@ -4,7 +4,8 @@ import securemsg.messaging.message;
 
 static Message makeMsg(const int32_t id, const int32_t userId = 1,
                        const uint32_t seq = 0) {
-  return {id, userId, "ct", "hdr", BaseMessage::Direction::Received, 0, seq, ""};
+  return {id, userId, "ct", "hdr", BaseMessage::Direction::Received,
+          0,  seq,    ""};
 }
 
 static GroupMessage makeGrpMsg(const int32_t id, const int32_t groupId = 10,

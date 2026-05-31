@@ -21,7 +21,8 @@ TEST_CASE("Message Direction enum values distinct", "[message]") {
 }
 
 TEST_CASE("GroupMessage construction and getters", "[message]") {
-  const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received, 0, ""};
+  const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received,
+                        0, ""};
   REQUIRE(gm.getId() == 1);
   REQUIRE(gm.getGroupId() == 10);
   REQUIRE(gm.getChainEpoch() == 2);
@@ -31,7 +32,7 @@ TEST_CASE("GroupMessage construction and getters", "[message]") {
 }
 
 TEST_CASE("GroupMessage plaintext via constructor", "[message]") {
-  const GroupMessage gm{1, 10, 2, 42, "ct", BaseMessage::Direction::Received, 0,
-                        "hello group"};
+  const GroupMessage gm{
+      1, 10, 2, 42, "ct", BaseMessage::Direction::Received, 0, "hello group"};
   REQUIRE(gm.getPlaintext() == "hello group");
 }

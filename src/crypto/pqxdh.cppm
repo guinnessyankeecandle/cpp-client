@@ -94,9 +94,9 @@ pqxdhReceive(const RawKeyPair &receiverIk, const RawKeyPair &receiverSpk,
   ikm.insert(ikm.end(), dh2.begin(), dh2.end());
   ikm.insert(ikm.end(), dh3.begin(), dh3.end());
   if (header.usedOpkPub) {
-    const auto it = std::ranges::find_if(
-        receiverOpks,
-        [&](const auto &kp) { return kp.pub == *header.usedOpkPub; });
+    const auto it = std::ranges::find_if(receiverOpks, [&](const auto &kp) {
+      return kp.pub == *header.usedOpkPub;
+    });
     if (it == receiverOpks.end())
       throw std::runtime_error("PQXDH: OPK used by sender not found in bundle");
     auto dh4 = x25519DH(it->priv, header.ephemeralPub);

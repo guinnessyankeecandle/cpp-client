@@ -37,10 +37,8 @@ TEST_CASE("PQXDH sender-receiver roundtrip produces identical SK", "[pqxdh]") {
   hdr.senderIkXPub = senderIk.pub;
   hdr.ephemeralPub = senderResult.ephemeralPub;
   hdr.pqCiphertext = senderResult.pqCiphertext;
-  
 
-  auto receiverSk =
-      pqxdhReceive(receiverIk, receiverSpk, {}, receiverPq, hdr);
+  auto receiverSk = pqxdhReceive(receiverIk, receiverSpk, {}, receiverPq, hdr);
   REQUIRE(senderResult.sessionKey == receiverSk);
 }
 

@@ -57,8 +57,8 @@ public:
                const int32_t senderId, std::string ciphertext,
                const Direction dir, const uint32_t seqInChain,
                std::string plaintext)
-      : BaseMessage(id, senderId, std::move(ciphertext), dir, epoch,
-                    seqInChain, std::move(plaintext)),
+      : BaseMessage(id, senderId, std::move(ciphertext), dir, epoch, seqInChain,
+                    std::move(plaintext)),
         m_groupId(groupId) {}
 
   [[nodiscard]] int32_t getGroupId() const { return m_groupId; }
