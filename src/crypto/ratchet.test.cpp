@@ -4,8 +4,8 @@ import securemsg.crypto.random;
 import securemsg.crypto.x25519;
 
 static std::pair<RatchetState, RatchetState> makeAliceBob() {
-  auto sk = randomBytes(32);
-  auto bobSpk = x25519Generate();
+  const auto sk = randomBytes(32);
+  const auto bobSpk = x25519Generate();
   auto alice = RatchetState::initSender(sk, bobSpk.pub);
   auto bob = RatchetState::initReceiver(sk, bobSpk);
   return {std::move(alice), std::move(bob)};

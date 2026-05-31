@@ -22,7 +22,7 @@ export struct MlKemEncapResult {
 
 using PkeyCtxPtr =
     OssPtr<EVP_PKEY_CTX,
-               EVP_PKEY_CTX_free>; // public-private key operation context
+           EVP_PKEY_CTX_free>; // public-private key operation context
 using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>; // public-private key
 
 export MlKemKeyPair mlkemGenerate() {

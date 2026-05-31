@@ -9,7 +9,7 @@ import securemsg.crypto.random;
 
 using PkeyCtxPtr =
     OssPtr<EVP_PKEY_CTX,
-               EVP_PKEY_CTX_free>; // public-private key operation context
+           EVP_PKEY_CTX_free>; // public-private key operation context
 using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;      // public-private key
 using MdCtxPtr = OssPtr<EVP_MD_CTX, EVP_MD_CTX_free>; // message digest
 

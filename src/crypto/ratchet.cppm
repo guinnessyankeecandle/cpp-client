@@ -1,8 +1,10 @@
 module;
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <openssl/crypto.h>
-#include <optional>
+#include <ranges>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -13,10 +15,17 @@ import securemsg.crypto.x25519;
 import securemsg.crypto.aead;
 import securemsg.crypto.kdf;
 
+static constexpr uint32_t RATCHET_MAX_SKIP = 1000;
+// header: X25519 pub + prevChainLen (4 bytes) + messageIndex (4 bytes)
+static constexpr std::size_t HEADER_COUNTER_BYTES =
+    sizeof(uint32_t) * 2; // prevChainLen + messageIndex
+static constexpr std::size_t HEADER_BYTES =
+    static_cast<std::size_t>(X25519_KEY_BYTES) + HEADER_COUNTER_BYTES;
+
 export struct RatchetHeader {
   std::vector<uint8_t> dhPub;
-  uint32_t pn{0};
-  uint32_t n{0};
+  uint32_t prevChainLen;
+  uint32_t messageIndex;
 };
 
 export struct RatchetMessage {
@@ -26,43 +35,39 @@ export struct RatchetMessage {
 
 static std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
 kdfCk(const std::vector<uint8_t> &ck) {
-  auto newCk = hkdf(ck, {}, "ratchet-chain-key", 32);
-  auto mk = hkdf(ck, {}, "ratchet-message-key", 32);
+  auto newCk = hkdf(ck, {}, "ratchet-chain-key", KEY_BYTES);
+  auto mk = hkdf(ck, {}, "ratchet-message-key", KEY_BYTES);
   return {std::move(newCk), std::move(mk)};
 }
 
 static std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
 kdfRk(const std::vector<uint8_t> &rk, const std::vector<uint8_t> &dhOut) {
-  auto newRk = hkdf(dhOut, rk, "ratchet-root-key", 32);
-  auto newCk = hkdf(dhOut, rk, "ratchet-chain-init", 32);
+  auto newRk = hkdf(dhOut, rk, "ratchet-root-key", KEY_BYTES);
+  auto newCk = hkdf(dhOut, rk, "ratchet-chain-init", KEY_BYTES);
   return {std::move(newRk), std::move(newCk)};
 }
 
-// ── Sender Key Ratchet (group messages) ─────────────────────────────────────
-
+// Sender Key Ratchet (group messages)
 export class SenderKeyRatchetState {
 public:
-  static constexpr uint32_t MAX_SKIP = 1000;
-
   static SenderKeyRatchetState init(const std::vector<uint8_t> &senderKey) {
-    SenderKeyRatchetState s;
-    s.m_CK = hkdf(senderKey, {}, "sender-key-chain-init", 32);
-    return s;
+    SenderKeyRatchetState state;
+    state.m_CK = hkdf(senderKey, {}, "sender-key-chain-init", KEY_BYTES);
+    return state;
   }
 
-  // Wire format: 4-byte big-endian iteration || AEAD-encrypted body
+  // Wire format: 4-byte iteration (native byte order) || AEAD-encrypted body
   std::vector<uint8_t> encrypt(const std::vector<uint8_t> &plaintext) {
     auto [newCk, mk] = advanceCk(m_CK);
     m_CK = std::move(newCk);
 
-    std::vector<uint8_t> out(4);
-    for (int i = 3; i >= 0; --i)
-      out[3 - i] = static_cast<uint8_t>((m_iteration >> (i * 8)) & 0xFF);
+    std::vector<uint8_t> out(sizeof(uint32_t));
+    std::memcpy(out.data(), &m_iteration, sizeof(uint32_t));
     m_iteration++;
 
-    auto pkt = aeadEncrypt(plaintext, mk);
+    const auto pkt = aeadEncrypt(plaintext, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
-    auto packed = packAead(pkt);
+    const auto packed = packAead(pkt);
     out.insert(out.end(), packed.begin(), packed.end());
     return out;
   }
@@ -73,14 +78,15 @@ public:
   };
 
   DecryptResult decrypt(const std::vector<uint8_t> &wire) {
-    if (wire.size() < 4)
+    if (wire.size() < sizeof(uint32_t))
       throw std::runtime_error("SenderKey message too short");
-    const uint32_t iter = (uint32_t(wire[0]) << 24) |
-                          (uint32_t(wire[1]) << 16) | (uint32_t(wire[2]) << 8) |
-                          uint32_t(wire[3]);
-    const std::vector<uint8_t> body(wire.begin() + 4, wire.end());
 
-    if (auto it = m_MKSKIPPED.find(iter); it != m_MKSKIPPED.end()) {
+    uint32_t iter{};
+    std::memcpy(&iter, wire.data(), sizeof(uint32_t));
+    const std::vector body(wire.begin() + sizeof(uint32_t), wire.end());
+
+    // Deal with, out of order messages
+    if (const auto it = m_MKSKIPPED.find(iter); it != m_MKSKIPPED.end()) {
       auto mk = it->second;
       m_MKSKIPPED.erase(it);
       auto plain = aeadDecrypt(unpackAead(body), mk);
@@ -88,25 +94,42 @@ public:
       return {std::move(plain), iter};
     }
 
+    // Finds cases where messages were skipped and then found
     if (iter < m_iteration)
       throw std::runtime_error("SenderKey: duplicate or replayed message");
-    if (iter - m_iteration > MAX_SKIP)
-      throw std::runtime_error("SenderKey: too many skipped messages");
 
-    while (m_iteration < iter) {
+    if (iter - m_iteration > RATCHET_MAX_SKIP) {
+      // Cleanse all stored skipped keys before throwing
+      for (auto &v : m_MKSKIPPED | std::views::values)
+        OPENSSL_cleanse(v.data(), v.size());
+
+      m_MKSKIPPED.clear();
+      throw std::runtime_error("SenderKey: too many skipped messages");
+    }
+
+    // Advance chain: store keys for skipped messages
+    std::vector<uint8_t> messageMk;
+    while (m_iteration <= iter) {
       auto [newCk, mk] = advanceCk(m_CK);
-      m_MKSKIPPED[m_iteration] = mk;
       m_CK = std::move(newCk);
+      if (m_iteration < iter) {
+        m_MKSKIPPED[m_iteration] = mk;
+        OPENSSL_cleanse(mk.data(), mk.size());
+      } else {
+        messageMk = std::move(mk);
+      }
       m_iteration++;
     }
 
-    auto [newCk, mk] = advanceCk(m_CK);
-    m_CK = std::move(newCk);
-    m_iteration++;
-
-    auto plain = aeadDecrypt(unpackAead(body), mk);
-    OPENSSL_cleanse(mk.data(), mk.size());
+    auto plain = aeadDecrypt(unpackAead(body), messageMk);
+    OPENSSL_cleanse(messageMk.data(), messageMk.size());
     return {std::move(plain), iter};
+  }
+
+  ~SenderKeyRatchetState() {
+    OPENSSL_cleanse(m_CK.data(), m_CK.size());
+    for (auto &v : m_MKSKIPPED | std::views::values)
+      OPENSSL_cleanse(v.data(), v.size());
   }
 
 private:
@@ -116,8 +139,8 @@ private:
 
   static std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
   advanceCk(const std::vector<uint8_t> &ck) {
-    return {hkdf(ck, {}, "sender-key-chain", 32),
-            hkdf(ck, {}, "sender-key-message", 32)};
+    return {hkdf(ck, {}, "sender-key-chain", KEY_BYTES),
+            hkdf(ck, {}, "sender-key-message", KEY_BYTES)};
   }
 };
 
@@ -125,8 +148,6 @@ private:
 
 export class RatchetState {
 public:
-  static constexpr uint32_t MAX_SKIP = 1000;
-
   // Initialise as sender (Alice) after PQXDH.
   // sk is the shared session key; bobSpkPub is Bob's SPK public key.
   static RatchetState initSender(const std::vector<uint8_t> &sk,
@@ -135,7 +156,7 @@ public:
     s.m_DHs = x25519Generate();
     s.m_DHr = bobSpkPub;
     // Both parties derive the same initial header key from sk
-    s.m_HK = hkdf(sk, {}, "ratchet-header-key", 32);
+    s.m_HK = hkdf(sk, {}, "ratchet-header-key", KEY_BYTES);
     auto [rk, cks] = kdfRk(sk, x25519DH(s.m_DHs.priv, bobSpkPub));
     s.m_RK = std::move(rk);
     s.m_CKs = std::move(cks);
@@ -149,7 +170,7 @@ public:
     s.m_DHs = spk;
     s.m_RK = sk;
     // Same header key as sender
-    s.m_HK = hkdf(sk, {}, "ratchet-header-key", 32);
+    s.m_HK = hkdf(sk, {}, "ratchet-header-key", KEY_BYTES);
     return s;
   }
 
@@ -157,13 +178,13 @@ public:
     auto [newCks, mk] = kdfCk(m_CKs);
     m_CKs = std::move(newCks);
 
-    RatchetHeader hdr{m_DHs.pub, m_PN, m_Ns};
+    const RatchetHeader hdr{m_DHs.pub, m_PN, m_Ns};
     m_Ns++;
 
-    auto hdrBytes = serialiseHeader(hdr);
-    auto hdrPkt = aeadEncrypt(hdrBytes, m_HK);
+    const auto hdrBytes = serialiseHeader(hdr);
+    const auto hdrPkt = aeadEncrypt(hdrBytes, m_HK);
 
-    auto bodyPkt = aeadEncrypt(plaintext, mk);
+    const auto bodyPkt = aeadEncrypt(plaintext, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
 
     return {packAead(hdrPkt), packAead(bodyPkt)};
@@ -181,7 +202,7 @@ public:
   DecryptResult decrypt(const RatchetMessage &msg) {
     const auto hdr = decryptHeader(msg.headerCiphertext);
     const auto pkt = unpackAead(msg.ciphertext);
-    const auto msgKey = std::make_pair(hdr.dhPub, hdr.n);
+    const auto msgKey = std::make_pair(hdr.dhPub, hdr.messageIndex);
 
     if (m_processed.contains(msgKey))
       throw std::runtime_error("Replayed message detected");
@@ -192,18 +213,18 @@ public:
       auto plain = aeadDecrypt(pkt, mk);
       OPENSSL_cleanse(mk.data(), mk.size());
       m_processed.insert(msgKey);
-      const uint32_t epoch = m_dhPubToEpoch.count(hdr.dhPub)
+      const uint32_t epoch = m_dhPubToEpoch.contains(hdr.dhPub)
                                  ? m_dhPubToEpoch.at(hdr.dhPub)
                                  : m_epoch;
-      return {std::move(plain), epoch, hdr.n};
+      return {std::move(plain), epoch, hdr.messageIndex};
     }
 
     if (hdr.dhPub != m_DHr) {
-      skipMessageKeys(hdr.pn);
+      skipMessageKeys(hdr.prevChainLen);
       dhRatchetStep(hdr.dhPub);
     }
 
-    skipMessageKeys(hdr.n);
+    skipMessageKeys(hdr.messageIndex);
     auto [newCkr, mk] = kdfCk(m_CKr);
     m_CKr = std::move(newCkr);
     m_Nr++;
@@ -211,7 +232,7 @@ public:
     auto plain = aeadDecrypt(pkt, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
     m_processed.insert(msgKey);
-    return {std::move(plain), m_epoch, hdr.n};
+    return {std::move(plain), m_epoch, hdr.messageIndex};
   }
 
 private:
@@ -225,6 +246,16 @@ private:
   uint32_t m_Nr{0};
   uint32_t m_PN{0};
   uint32_t m_epoch{0};
+  ~RatchetState() {
+    for (auto &v : m_MKSKIPPED | std::views::values)
+      OPENSSL_cleanse(v.data(), v.size());
+
+    OPENSSL_cleanse(m_RK.data(), m_RK.size());
+    OPENSSL_cleanse(m_HK.data(), m_HK.size());
+    OPENSSL_cleanse(m_CKs.data(), m_CKs.size());
+    OPENSSL_cleanse(m_CKr.data(), m_CKr.size());
+  }
+
   std::map<std::pair<std::vector<uint8_t>, uint32_t>, std::vector<uint8_t>>
       m_MKSKIPPED;
   std::set<std::pair<std::vector<uint8_t>, uint32_t>> m_processed;
@@ -233,8 +264,13 @@ private:
   void skipMessageKeys(uint32_t until) {
     if (m_Nr > until)
       return;
-    if (until - m_Nr > MAX_SKIP)
+    if (until - m_Nr > RATCHET_MAX_SKIP) {
+      for (auto &v : m_MKSKIPPED | std::views::values)
+        OPENSSL_cleanse(v.data(), v.size());
+
+      m_MKSKIPPED.clear();
       throw std::runtime_error("Too many skipped messages");
+    }
     while (m_Nr < until) {
       auto [newCkr, mk] = kdfCk(m_CKr);
       m_MKSKIPPED[{m_DHr, m_Nr}] = mk;
@@ -259,26 +295,27 @@ private:
   }
 
   static std::vector<uint8_t> serialiseHeader(const RatchetHeader &h) {
-    std::vector<uint8_t> out;
-    out.insert(out.end(), h.dhPub.begin(), h.dhPub.end());
-    for (int i = 3; i >= 0; --i)
-      out.push_back((h.pn >> (i * 8)) & 0xFF);
-    for (int i = 3; i >= 0; --i)
-      out.push_back((h.n >> (i * 8)) & 0xFF);
+    std::vector<uint8_t> out(HEADER_BYTES);
+    std::ranges::copy(h.dhPub, out.begin());
+    std::memcpy(out.data() + X25519_KEY_BYTES, &h.prevChainLen,
+                sizeof(uint32_t));
+    std::memcpy(out.data() + X25519_KEY_BYTES + sizeof(uint32_t),
+                &h.messageIndex, sizeof(uint32_t));
     return out;
   }
 
   RatchetHeader decryptHeader(const std::vector<uint8_t> &hdrCt) const {
-    auto pkt = unpackAead(hdrCt);
+    const auto pkt = unpackAead(hdrCt);
     auto bytes = aeadDecrypt(pkt, m_HK);
-    if (bytes.size() < 40)
+    if (bytes.size() < HEADER_BYTES)
       throw std::runtime_error("Header too short");
     RatchetHeader h;
-    h.dhPub.assign(bytes.begin(), bytes.begin() + 32);
-    h.pn = (uint32_t(bytes[32]) << 24) | (uint32_t(bytes[33]) << 16) |
-           (uint32_t(bytes[34]) << 8) | uint32_t(bytes[35]);
-    h.n = (uint32_t(bytes[36]) << 24) | (uint32_t(bytes[37]) << 16) |
-          (uint32_t(bytes[38]) << 8) | uint32_t(bytes[39]);
+    h.dhPub.assign(bytes.begin(), bytes.begin() + X25519_KEY_BYTES);
+    std::memcpy(&h.prevChainLen, bytes.data() + X25519_KEY_BYTES,
+                sizeof(uint32_t));
+    std::memcpy(&h.messageIndex,
+                bytes.data() + X25519_KEY_BYTES + sizeof(uint32_t),
+                sizeof(uint32_t));
     return h;
   }
 };

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -46,6 +47,15 @@ struct AppState {
   bool viewingGroup{false};
   MessageStore messageStore;
   std::string composeText;
+
+  // Selected message for actions (server-assigned ID)
+  int32_t selectedMsgId{-1};
+  std::string selectedMsgIdStr; // text input for selecting a message by ID
+  std::string statusMsg;        // feedback for message actions
+  std::string forwardToId;      // recipient ID for forwarding
+
+  // Group epoch tracking for membership change warnings
+  std::unordered_map<int32_t, int32_t> knownGroupEpochs;
 
   bool showIdentityOverlay{false};
   std::string overlayTargetName;
@@ -395,9 +405,17 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
                     arr, std::back_inserter(members),
                     [](const auto &m) { return m.template get<int32_t>(); });
               }
-              state.groups.emplace_back(g.value("id", 0), g.value("name", ""),
-                                        std::move(members),
-                                        g.value("epoch", 0));
+              const int32_t gid = g.value("id", 0);
+              const int32_t epoch = g.value("epoch", 0);
+              // Warn if epoch changed — server may have modified membership
+              if (state.knownGroupEpochs.contains(gid) &&
+                  state.knownGroupEpochs.at(gid) != epoch)
+                state.statusMsg =
+                    "⚠ Group " + g.value("name", std::to_string(gid)) +
+                    " membership changed — verify members out-of-band";
+              state.knownGroupEpochs[gid] = epoch;
+              state.groups.emplace_back(gid, g.value("name", ""),
+                                        std::move(members), epoch);
             }
           }
         }
@@ -437,6 +455,20 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   }
 
   auto composeInput = Input(&state.composeText, "Type a message...");
+  auto forwardInput = Input(&state.forwardToId, "Recipient ID");
+  auto msgIdInput = Input(&state.selectedMsgIdStr, "Msg ID");
+  msgIdInput |= CatchEvent([&](const Event &e) {
+    if (e == Event::Return && !state.selectedMsgIdStr.empty()) {
+      try {
+        state.selectedMsgId = std::stoi(state.selectedMsgIdStr);
+        state.statusMsg = "Selected message " + state.selectedMsgIdStr;
+      } catch (...) {
+        state.statusMsg = "Invalid message ID.";
+      }
+      return true;
+    }
+    return false;
+  });
 
   auto btnSend = Button(" Send ", [&] {
     if (state.composeText.empty())
@@ -459,7 +491,116 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       state.composeText.clear();
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
-      state.composeText = "Error: " + std::string(e.what());
+      state.statusMsg = "Send error: " + std::string(e.what());
+    }
+  });
+
+  // Forward selected message to another user
+  auto btnForward = Button(" Forward ", [&] {
+    if (!state.localUser || state.selectedMsgId < 0 ||
+        state.forwardToId.empty()) {
+      state.statusMsg = "Select a message and enter recipient ID to forward.";
+      return;
+    }
+    try {
+      const int32_t recipientId = std::stoi(state.forwardToId);
+      // Find the message plaintext in the store
+      const auto msgs = state.messageStore.getByUser(state.selectedContactId);
+      const auto it = std::ranges::find_if(msgs, [&](const auto &m) {
+        return m.getId() == state.selectedMsgId;
+      });
+      if (it == msgs.end()) {
+        state.statusMsg = "Message not found locally.";
+        return;
+      }
+      sendDirectMessage(api, state.ratchets, state.messageStore,
+                        state.localUser->getAccessToken(), recipientId,
+                        it->getPlaintext(), state.localUser->getKeyBundle().spk,
+                        state.contactCache);
+      state.statusMsg = "Forwarded.";
+      state.forwardToId.clear();
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.statusMsg = "Forward error: " + std::string(e.what());
+    }
+  });
+
+  // Revoke selected message on server
+  auto btnRevoke = Button(" Revoke ", [&] {
+    if (!state.localUser || state.selectedMsgId < 0) {
+      state.statusMsg = "Select a message to revoke.";
+      return;
+    }
+    try {
+      api.revokeMessage(state.localUser->getAccessToken(), state.selectedMsgId);
+      state.statusMsg = "Message revoked on server.";
+      state.selectedMsgId = -1;
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.statusMsg = "Revoke error: " + std::string(e.what());
+    }
+  });
+
+  // Download selected message to file
+  auto btnDownload = Button(" Download ", [&] {
+    if (state.selectedMsgId < 0) {
+      state.statusMsg = "Select a message to download.";
+      return;
+    }
+    try {
+      const auto msgs = state.viewingGroup ? std::vector<BaseMessage *>{}
+                                           : std::vector<BaseMessage *>{};
+      // Find plaintext from store
+      std::string plaintext;
+      if (!state.viewingGroup) {
+        const auto direct =
+            state.messageStore.getByUser(state.selectedContactId);
+        const auto it = std::ranges::find_if(direct, [&](const auto &m) {
+          return m.getId() == state.selectedMsgId;
+        });
+        if (it != direct.end())
+          plaintext = it->getPlaintext();
+      } else {
+        const auto grp = state.messageStore.getByGroup(state.selectedGroupId);
+        const auto it = std::ranges::find_if(grp, [&](const auto &m) {
+          return m.getId() == state.selectedMsgId;
+        });
+        if (it != grp.end())
+          plaintext = it->getPlaintext();
+      }
+      if (plaintext.empty()) {
+        state.statusMsg = "Message not found or empty.";
+        return;
+      }
+      const std::string filename =
+          "message_" + std::to_string(state.selectedMsgId) + ".txt";
+      std::ofstream f(filename);
+      if (!f) {
+        state.statusMsg = "Could not write file.";
+        return;
+      }
+      f << plaintext;
+      state.statusMsg = "Saved to " + filename;
+    } catch (const std::exception &e) {
+      state.statusMsg = "Download error: " + std::string(e.what());
+    }
+  });
+
+  // Delete message locally (acknowledge receipt removes from server too)
+  auto btnDelete = Button(" Delete ", [&] {
+    if (!state.localUser || state.selectedMsgId < 0) {
+      state.statusMsg = "Select a message to delete.";
+      return;
+    }
+    try {
+      api.acknowledgeReceipt(state.localUser->getAccessToken(),
+                             state.selectedMsgId);
+      state.messageStore.clear(); // refresh from server on next poll
+      state.statusMsg = "Message deleted.";
+      state.selectedMsgId = -1;
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.statusMsg = "Delete error: " + std::string(e.what());
     }
   });
 
@@ -514,28 +655,47 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   });
 
   const auto rightPanel = Renderer(
-      Container::Vertical({composeInput, btnSend}), [&, composeInput, btnSend] {
+      Container::Vertical({composeInput, btnSend, msgIdInput, forwardInput,
+                           btnForward, btnRevoke, btnDownload, btnDelete}),
+      [&, composeInput, btnSend, msgIdInput, forwardInput, btnForward,
+       btnRevoke, btnDownload, btnDelete] {
         Elements msgs;
         if (state.viewingGroup && state.selectedGroupId >= 0) {
           for (const auto &m :
                state.messageStore.getByGroup(state.selectedGroupId)) {
-            auto line = text(" Them: " + m.getPlaintext());
+            const bool sel = m.getId() == state.selectedMsgId;
+            auto line = text(" [" + std::to_string(m.getId()) +
+                             "] Them: " + m.getPlaintext()) |
+                        (sel ? inverted : nothing);
             msgs.push_back(line);
           }
         } else if (!state.viewingGroup && state.selectedContactId >= 0) {
           for (const auto &m :
                state.messageStore.getByUser(state.selectedContactId)) {
             const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
-            auto line = text((mine ? " You: " : " Them: ") + m.getPlaintext());
+            const bool sel = m.getId() == state.selectedMsgId;
+            auto line =
+                text((mine ? " You" : " Them") + std::string(" [") +
+                     std::to_string(m.getId()) + "]: " + m.getPlaintext()) |
+                (sel ? inverted : nothing);
             msgs.push_back(mine ? line | align_right : line);
           }
         }
         if (msgs.empty())
           msgs.push_back(text(" No messages yet ") | dim | center);
+        if (!state.statusMsg.empty())
+          msgs.push_back(text(" " + state.statusMsg) | dim);
         return vbox({
                    vbox(std::move(msgs)) | flex | frame,
                    separator(),
                    hbox({composeInput->Render() | flex, btnSend->Render()}),
+                   separator(),
+                   hbox({text(" Select: "),
+                         msgIdInput->Render() | size(WIDTH, EQUAL, 6),
+                         text("  Fwd→: "), forwardInput->Render() | flex,
+                         btnForward->Render()}),
+                   hbox({btnRevoke->Render(), btnDownload->Render(),
+                         btnDelete->Render()}),
                }) |
                border;
       });
