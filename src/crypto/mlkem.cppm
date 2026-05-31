@@ -12,11 +12,6 @@ export constexpr int MLKEM1024_PRIV_BYTES = 3168; // FIPS 203 decapsulation key
 export constexpr int MLKEM1024_CT_BYTES = 1568;
 export constexpr int MLKEM1024_SS_BYTES = 32;
 
-export struct MlKemKeyPair {
-  std::vector<uint8_t> priv;
-  std::vector<uint8_t> pub;
-};
-
 export struct MlKemEncapResult {
   std::vector<uint8_t> ciphertext;
   std::vector<uint8_t> sharedSecret;
@@ -27,7 +22,7 @@ using PkeyCtxPtr =
            EVP_PKEY_CTX_free>; // public-private key operation context
 using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>; // public-private key
 
-export MlKemKeyPair mlkemGenerate() {
+export RawKeyPair mlkemGenerate() {
   const auto ctx =
       PkeyCtxPtr(EVP_PKEY_CTX_new_from_name(nullptr, "ML-KEM-1024", nullptr));
   if (!ctx)
@@ -41,7 +36,7 @@ export MlKemKeyPair mlkemGenerate() {
     return PkeyPtr(tmp);
   }();
 
-  MlKemKeyPair key_pair;
+  RawKeyPair key_pair;
 
   // Get sizes
   std::size_t privLen = 0, pubLen = 0;

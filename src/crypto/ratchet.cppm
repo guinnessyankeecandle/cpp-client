@@ -165,7 +165,7 @@ public:
 
   // Initialise as receiver (Bob) after PQXDH.
   static RatchetState initReceiver(const std::vector<uint8_t> &sk,
-                                   const X25519KeyPair &signed_pre_key) {
+                                   const RawKeyPair &signed_pre_key) {
     RatchetState ratchet_state;
     ratchet_state.m_sendingKeyPair = signed_pre_key;
     ratchet_state.m_rootKey = sk;
@@ -253,7 +253,7 @@ public:
   }
 
 private:
-  X25519KeyPair m_sendingKeyPair;
+  RawKeyPair m_sendingKeyPair;
   std::vector<uint8_t> m_remotePublicKey;
   std::vector<uint8_t> m_rootKey;
   std::vector<uint8_t> m_headerKey;

@@ -17,12 +17,12 @@ import securemsg.crypto.x25519;
 import securemsg.crypto.mlkem;
 
 export struct KeyBundle {
-  Ed25519KeyPair ik;
-  X25519KeyPair spk;
+  RawKeyPair ik;
+  RawKeyPair spk;
   std::vector<uint8_t> spkSig;
-  MlKemKeyPair pq;
+  RawKeyPair pq;
   std::vector<uint8_t> pqSig;
-  std::vector<X25519KeyPair> opks;
+  std::vector<RawKeyPair> opks;
 };
 
 static constexpr int PBKDF2_SALT_BYTES = 16;
@@ -127,7 +127,7 @@ export KeyBundle keystoreLoad(const std::string &path,
   const uint8_t opkCount = read(1)[0];
   kb.opks.reserve(opkCount);
   for (uint8_t i = 0; i < opkCount; ++i) {
-    X25519KeyPair opk;
+    RawKeyPair opk;
     opk.priv = read(X25519_KEY_BYTES);
     opk.pub = read(X25519_KEY_BYTES);
     kb.opks.push_back(std::move(opk));

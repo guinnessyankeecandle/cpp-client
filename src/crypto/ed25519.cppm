@@ -17,34 +17,9 @@ export constexpr int ED25519_PRIV_BYTES = 32;
 export constexpr int ED25519_PUB_BYTES = 32;
 export constexpr int ED25519_SIG_BYTES = 64;
 
-export struct Ed25519KeyPair {
-  std::vector<uint8_t> priv;
-  std::vector<uint8_t> pub;
-};
-
-export Ed25519KeyPair ed25519Generate() {
-  const auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr));
-  if (!ctx)
-    throw std::runtime_error("EVP_PKEY_CTX_new_id Ed25519 failed");
-  sslAssert(EVP_PKEY_keygen_init(ctx.get()), "Ed25519 keygen_init");
-
-  const auto key_pair_ptr = [&] {
-    EVP_PKEY *tmp = nullptr;
-    sslAssert(EVP_PKEY_keygen(ctx.get(), &tmp), "Ed25519 keygen");
-    return PkeyPtr(tmp);
-  }();
-
-  Ed25519KeyPair kp;
-  kp.priv.resize(ED25519_PRIV_BYTES);
-  kp.pub.resize(ED25519_PUB_BYTES);
-  std::size_t privLen = ED25519_PRIV_BYTES, pubLen = ED25519_PUB_BYTES;
-  sslAssert(EVP_PKEY_get_raw_private_key(key_pair_ptr.get(), kp.priv.data(),
-                                         &privLen),
-            "Ed25519 get_raw_private_key");
-  sslAssert(
-      EVP_PKEY_get_raw_public_key(key_pair_ptr.get(), kp.pub.data(), &pubLen),
-      "Ed25519 get_raw_public_key");
-  return kp;
+export RawKeyPair ed25519Generate() {
+  auto [priv, pub] = generateRawKeyPair(EVP_PKEY_ED25519, "Ed25519");
+  return {std::move(priv), std::move(pub)};
 }
 
 export std::vector<uint8_t> ed25519Sign(const std::vector<uint8_t> &privKey,

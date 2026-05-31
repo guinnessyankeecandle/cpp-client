@@ -184,7 +184,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
       std::vector<std::string> opkPubs;
       std::ranges::transform(
           state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
-          [](const X25519KeyPair &k) { return base64Encode(k.pub); });
+          [](const RawKeyPair &k) { return base64Encode(k.pub); });
       const auto &kb = state.localUser->getKeyBundle();
       api.publishKeyBundle(state.localUser->getAccessToken(),
                            base64Encode(kb.ik.pub), base64Encode(kb.spk.pub),
@@ -297,7 +297,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
         std::vector<std::string> opkPubs;
         std::ranges::transform(
             state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
-            [](const X25519KeyPair &k) { return base64Encode(k.pub); });
+            [](const RawKeyPair &k) { return base64Encode(k.pub); });
         const auto &kb = state.localUser->getKeyBundle();
         api.publishKeyBundle(state.localUser->getAccessToken(),
                              base64Encode(kb.ik.pub), base64Encode(kb.spk.pub),

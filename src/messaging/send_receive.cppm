@@ -32,7 +32,7 @@ export struct SendResult {
 export SendResult
 sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
                   const std::string &accessToken, int32_t recipientId,
-                  const std::string &plaintext, const X25519KeyPair &senderIk,
+                  const std::string &plaintext, const RawKeyPair &senderIk,
                   const std::vector<Contact> &contactCache) {
 
   if (!ratchets.contains(recipientId)) {
@@ -94,8 +94,8 @@ sendDirectMessage(ApiClient &api, RatchetMap &ratchets, MessageStore &store,
 export void receiveDirectMessages(
     ApiClient &api, RatchetMap &ratchets, MessageStore &store,
     const std::string &accessToken, int32_t myUserId,
-    const X25519KeyPair & /*mySpk*/, const std::optional<X25519KeyPair> &myOpk,
-    const MlKemKeyPair &myPq, std::vector<Contact> & /*contactCache*/,
+    const RawKeyPair & /*mySpk*/, const std::optional<RawKeyPair> &myOpk,
+    const RawKeyPair &myPq, std::vector<Contact> & /*contactCache*/,
     const ApiClient &apiForLookup) {
 
   auto messages = api.listMessages(accessToken);
@@ -142,7 +142,7 @@ export void receiveDirectMessages(
 export std::string encryptSkdmForMember(ApiClient &api,
                                         const std::string &accessToken,
                                         int32_t memberId,
-                                        const X25519KeyPair &senderIk,
+                                        const RawKeyPair &senderIk,
                                         const std::vector<uint8_t> &senderKey) {
   auto bundle = api.getKeyBundle(accessToken, memberId);
   auto ikEdPub = base64Decode(bundle.at("identity_pub").get<std::string>());

@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 import securemsg.crypto.pqxdh;
+import securemsg.crypto.random;
 import securemsg.crypto.ed25519;
 import securemsg.crypto.x25519;
 import securemsg.crypto.mlkem;
@@ -7,9 +8,9 @@ import securemsg.crypto.mlkem;
 // signingIk = Ed25519 (for signing SPK/PQ prekey)
 // receiverIk = X25519 (for DH)
 static RemoteKeyBundle
-makeBundle(const X25519KeyPair &receiverIk, const Ed25519KeyPair &signingIk,
-           const X25519KeyPair &spk, const MlKemKeyPair &pqKp,
-           std::optional<X25519KeyPair> opk = std::nullopt) {
+makeBundle(const RawKeyPair &receiverIk, const RawKeyPair &signingIk,
+           const RawKeyPair &spk, const RawKeyPair &pqKp,
+           std::optional<RawKeyPair> opk = std::nullopt) {
   RemoteKeyBundle b;
   b.ikEdPub = signingIk.pub;
   b.ikXPub = receiverIk.pub;

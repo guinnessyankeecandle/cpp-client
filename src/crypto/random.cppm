@@ -17,6 +17,10 @@ export {
       std::unique_ptr<T, std::integral_constant<decltype(DelFn), DelFn>>;
 }
 
+using PkeyCtxPtr = OssPtr<EVP_PKEY_CTX, EVP_PKEY_CTX_free>;
+using PkeyPtr = OssPtr<EVP_PKEY, EVP_PKEY_free>;
+
+
 export inline void sslAssert(const int return_code, const char *op) {
   if (return_code != 1)
     throw std::runtime_error(std::string(op) + " failed");
@@ -27,6 +31,41 @@ export std::vector<uint8_t> randomBytes(const std::size_t numBytes) {
   if (numBytes > 0)
     sslAssert(RAND_bytes(buf.data(), static_cast<int>(numBytes)), "RAND_bytes");
   return buf;
+}
+
+export struct RawKeyPair {
+  std::vector<uint8_t> priv;
+  std::vector<uint8_t> pub;
+};
+
+export RawKeyPair generateRawKeyPair(const int evpKeyType, const char *name) {
+  const auto ctx = PkeyCtxPtr(EVP_PKEY_CTX_new_id(evpKeyType, nullptr));
+  if (!ctx)
+    throw std::runtime_error(std::string(name) + " CTX_new_id failed");
+  sslAssert(EVP_PKEY_keygen_init(ctx.get()),
+            (std::string(name) + " keygen_init").c_str());
+
+  const auto key_pair_ptr = [&] {
+    EVP_PKEY *tmp = nullptr;
+    sslAssert(EVP_PKEY_keygen(ctx.get(), &tmp),
+              (std::string(name) + " keygen").c_str());
+    return PkeyPtr(tmp);
+  }();
+
+  std::size_t privLen = 0, pubLen = 0;
+  EVP_PKEY_get_raw_private_key(key_pair_ptr.get(), nullptr, &privLen);
+  EVP_PKEY_get_raw_public_key(key_pair_ptr.get(), nullptr, &pubLen);
+
+  RawKeyPair kp;
+  kp.priv.resize(privLen);
+  kp.pub.resize(pubLen);
+  sslAssert(EVP_PKEY_get_raw_private_key(key_pair_ptr.get(), kp.priv.data(),
+                                         &privLen),
+            (std::string(name) + " get_raw_private_key").c_str());
+  sslAssert(EVP_PKEY_get_raw_public_key(key_pair_ptr.get(), kp.pub.data(),
+                                        &pubLen),
+            (std::string(name) + " get_raw_public_key").c_str());
+  return kp;
 }
 
 export std::string base64Encode(const std::span<const uint8_t> data) {

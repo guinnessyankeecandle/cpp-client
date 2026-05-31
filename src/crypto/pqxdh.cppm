@@ -38,7 +38,7 @@ export struct PqxdhInitialHeader {
 // 32 x 0xFF prefix in IKM — prevents PQXDH keys being confused with X3DH keys
 static const std::vector<uint8_t> PQXDH_BINDER(32, 0xFF);
 
-export PqxdhSenderResult pqxdhSend(const X25519KeyPair &senderIk,
+export PqxdhSenderResult pqxdhSend(const RawKeyPair &senderIk,
                                    const RemoteKeyBundle &remote) {
 
   if (!ed25519Verify(remote.ikEdPub, remote.spkPub, remote.spkSig))
@@ -78,9 +78,9 @@ export PqxdhSenderResult pqxdhSend(const X25519KeyPair &senderIk,
 }
 
 export std::vector<uint8_t>
-pqxdhReceive(const X25519KeyPair &receiverIk, const X25519KeyPair &receiverSpk,
-             const std::optional<X25519KeyPair> &receiverOpk,
-             const MlKemKeyPair &receiverPq, const PqxdhInitialHeader &header) {
+pqxdhReceive(const RawKeyPair &receiverIk, const RawKeyPair &receiverSpk,
+             const std::optional<RawKeyPair> &receiverOpk,
+             const RawKeyPair &receiverPq, const PqxdhInitialHeader &header) {
 
   auto dh1 = x25519DH(receiverSpk.priv,
                       header.senderIkXPub); // receiver SPK × sender IK
