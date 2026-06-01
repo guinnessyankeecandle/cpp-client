@@ -88,6 +88,12 @@ public:
                       accessToken);
   }
 
+  [[nodiscard]] nlohmann::json lookupById(const std::string &accessToken,
+                                          const int32_t userId) const {
+    return m_http.get("/keys/lookup/by-id?user_id=" + std::to_string(userId),
+                      accessToken);
+  }
+
   [[nodiscard]] nlohmann::json getKeyBundle(const std::string &accessToken,
                                             const int32_t userId) const {
     return m_http.get("/keys/" + std::to_string(userId), accessToken);
