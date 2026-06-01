@@ -14,6 +14,7 @@ makeBundle(const RawKeyPair &receiverIk, const RawKeyPair &signingIk,
   RemoteKeyBundle b;
   b.ikEdPub = signingIk.pub;
   b.ikXPub = receiverIk.pub;
+  b.ikXSig = ed25519Sign(signingIk.priv, receiverIk.pub);
   b.spkPub = spk.pub;
   b.spkSig = ed25519Sign(signingIk.priv, spk.pub);
   b.pqPub = pqKp.pub;

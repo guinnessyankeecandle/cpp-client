@@ -40,11 +40,14 @@ kdfCk(const std::vector<uint8_t> &ck) {
   return {std::move(newCk), std::move(mk)};
 }
 
-static std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
+// Returns (new root key, new chain key, next header key) — matches Signal spec
+static std::tuple<std::vector<uint8_t>, std::vector<uint8_t>,
+                  std::vector<uint8_t>>
 kdfRk(const std::vector<uint8_t> &rk, const std::vector<uint8_t> &dhOut) {
   auto newRk = hkdf(dhOut, rk, "ratchet-root-key", KEY_BYTES);
   auto newCk = hkdf(dhOut, rk, "ratchet-chain-init", KEY_BYTES);
-  return {std::move(newRk), std::move(newCk)};
+  auto nhk = hkdf(dhOut, rk, "ratchet-next-header-key", KEY_BYTES);
+  return {std::move(newRk), std::move(newCk), std::move(nhk)};
 }
 
 // Sender Key Ratchet (group messages)
@@ -154,9 +157,12 @@ public:
     RatchetState ratchet_state;
     ratchet_state.m_sendingKeyPair = x25519Generate();
     ratchet_state.m_remotePublicKey = bobSpkPub;
-    // Both parties derive the same initial header key from sk
-    ratchet_state.m_headerKey = hkdf(sk, {}, "ratchet-header-key", KEY_BYTES);
-    auto [rk, cks] =
+    // All four initial header keys derived from SK — matches Signal spec
+    ratchet_state.m_sendHeaderKey     = hkdf(sk, {}, "ratchet-hks",  KEY_BYTES);
+    ratchet_state.m_recvHeaderKey     = hkdf(sk, {}, "ratchet-hkr",  KEY_BYTES);
+    ratchet_state.m_nextSendHeaderKey = hkdf(sk, {}, "ratchet-nhks", KEY_BYTES);
+    ratchet_state.m_nextRecvHeaderKey = hkdf(sk, {}, "ratchet-nhkr", KEY_BYTES);
+    auto [rk, cks, nhk_ignored] =
         kdfRk(sk, x25519DH(ratchet_state.m_sendingKeyPair.priv, bobSpkPub));
     ratchet_state.m_rootKey = std::move(rk);
     ratchet_state.m_sendChainKey = std::move(cks);
@@ -169,8 +175,11 @@ public:
     RatchetState ratchet_state;
     ratchet_state.m_sendingKeyPair = signed_pre_key;
     ratchet_state.m_rootKey = sk;
-    // Same header key as sender
-    ratchet_state.m_headerKey = hkdf(sk, {}, "ratchet-header-key", KEY_BYTES);
+    // Symmetric to sender — recv/send swapped
+    ratchet_state.m_recvHeaderKey     = hkdf(sk, {}, "ratchet-hks",  KEY_BYTES);
+    ratchet_state.m_sendHeaderKey     = hkdf(sk, {}, "ratchet-hkr",  KEY_BYTES);
+    ratchet_state.m_nextRecvHeaderKey = hkdf(sk, {}, "ratchet-nhks", KEY_BYTES);
+    ratchet_state.m_nextSendHeaderKey = hkdf(sk, {}, "ratchet-nhkr", KEY_BYTES);
     return ratchet_state;
   }
 
@@ -185,7 +194,7 @@ public:
     m_sendCount++;
 
     const auto hdrBytes = serializeHeader(hdr);
-    const auto hdrPkt = aeadEncrypt(hdrBytes, m_headerKey);
+    const auto hdrPkt = aeadEncrypt(hdrBytes, m_sendHeaderKey);
 
     const auto bodyPkt = aeadEncrypt(plaintext, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
@@ -247,7 +256,12 @@ public:
       OPENSSL_cleanse(v.data(), v.size());
 
     OPENSSL_cleanse(m_rootKey.data(), m_rootKey.size());
-    OPENSSL_cleanse(m_headerKey.data(), m_headerKey.size());
+    OPENSSL_cleanse(m_sendHeaderKey.data(), m_sendHeaderKey.size());
+    OPENSSL_cleanse(m_recvHeaderKey.data(), m_recvHeaderKey.size());
+    OPENSSL_cleanse(m_nextSendHeaderKey.data(), m_nextSendHeaderKey.size());
+    OPENSSL_cleanse(m_nextRecvHeaderKey.data(), m_nextRecvHeaderKey.size());
+    if (!m_pendingNextRecvHK.empty())
+      OPENSSL_cleanse(m_pendingNextRecvHK.data(), m_pendingNextRecvHK.size());
     OPENSSL_cleanse(m_sendChainKey.data(), m_sendChainKey.size());
     OPENSSL_cleanse(m_recvChainKey.data(), m_recvChainKey.size());
   }
@@ -256,7 +270,11 @@ private:
   RawKeyPair m_sendingKeyPair;
   std::vector<uint8_t> m_remotePublicKey;
   std::vector<uint8_t> m_rootKey;
-  std::vector<uint8_t> m_headerKey;
+  std::vector<uint8_t> m_sendHeaderKey;
+  std::vector<uint8_t> m_recvHeaderKey;
+  std::vector<uint8_t> m_nextSendHeaderKey;
+  std::vector<uint8_t> m_nextRecvHeaderKey;
+  std::vector<uint8_t> m_pendingNextRecvHK; // kdfRk NHK, promoted on lazy HK advance
   std::vector<uint8_t> m_sendChainKey;
   std::vector<uint8_t> m_recvChainKey;
   uint32_t m_sendCount{0};
@@ -296,20 +314,28 @@ private:
     m_recvCount = 0;
     m_remotePublicKey = newRemoteKey;
     m_dhPubToEpoch[newRemoteKey] = ++m_dhRatchetEpoch;
-    auto [intermediateRootKey, newRecvChainKey] =
+    auto [intermediateRootKey, newRecvChainKey, newNextRecvHK] =
         kdfRk(m_rootKey, x25519DH(m_sendingKeyPair.priv, newRemoteKey));
+    // Store as pending — only promoted to m_nextRecvHeaderKey on lazy advance
+    m_pendingNextRecvHK = std::move(newNextRecvHK);
+
     OPENSSL_cleanse(m_rootKey.data(), m_rootKey.size());
     OPENSSL_cleanse(m_sendingKeyPair.priv.data(), m_sendingKeyPair.priv.size());
+
+    OPENSSL_cleanse(m_sendHeaderKey.data(), m_sendHeaderKey.size());
+    m_sendHeaderKey = std::move(m_nextSendHeaderKey);
+
     m_sendingKeyPair = x25519Generate();
-    auto [newRootKey, newSendChainKey] = kdfRk(
+    auto [newRootKey, newSendChainKey, newNextSendHK] = kdfRk(
         intermediateRootKey, x25519DH(m_sendingKeyPair.priv, newRemoteKey));
+    m_nextSendHeaderKey = std::move(newNextSendHK);
+
     OPENSSL_cleanse(intermediateRootKey.data(), intermediateRootKey.size());
     OPENSSL_cleanse(m_recvChainKey.data(), m_recvChainKey.size());
     OPENSSL_cleanse(m_sendChainKey.data(), m_sendChainKey.size());
     m_rootKey = std::move(newRootKey);
     m_recvChainKey = std::move(newRecvChainKey);
     m_sendChainKey = std::move(newSendChainKey);
-    // m_headerKey stays fixed (derived from initial sk) for the session
 
     // Evict replay-detection entries from epochs before the current one;
     // their DH keys are gone so replay is impossible without them.
@@ -330,9 +356,21 @@ private:
   }
 
   [[nodiscard]] RatchetHeader
-  decryptHeader(const std::vector<uint8_t> &hdrCt) const {
+  decryptHeader(const std::vector<uint8_t> &hdrCt) {
     const auto pkt = unpackAead(hdrCt);
-    auto bytes = aeadDecrypt(pkt, m_headerKey);
+    std::vector<uint8_t> bytes;
+    try {
+      bytes = aeadDecrypt(pkt, m_recvHeaderKey);
+    } catch (...) {
+      bytes = aeadDecrypt(pkt, m_nextRecvHeaderKey);
+      // Sender has ratcheted — advance header key and promote pending NHK
+      OPENSSL_cleanse(m_recvHeaderKey.data(), m_recvHeaderKey.size());
+      m_recvHeaderKey = m_nextRecvHeaderKey;
+      if (!m_pendingNextRecvHK.empty()) {
+        m_nextRecvHeaderKey = std::move(m_pendingNextRecvHK);
+        m_pendingNextRecvHK.clear();
+      }
+    }
 
     if (bytes.size() < HEADER_BYTES)
       throw std::runtime_error("Header too short");

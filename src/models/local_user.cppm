@@ -1,5 +1,6 @@
 module;
 #include <filesystem>
+#include <openssl/crypto.h>
 #include <optional>
 #include <string>
 #include <vector>
@@ -7,6 +8,7 @@ export module securemsg.models.local_user;
 import securemsg.models.user;
 import securemsg.crypto.keystore;
 import securemsg.crypto.x25519;
+import securemsg.crypto.ed25519;
 
 export class LocalUser : public User {
 public:
@@ -35,6 +37,19 @@ public:
 
   [[nodiscard]] const KeyBundle &getKeyBundle() const { return *m_keyBundle; }
 
+  // Removes the OPK with the given public key after it has been consumed by PQXDH.
+  void consumeOneTimePrekey(const std::vector<uint8_t> &opkPub,
+                            const std::string &passphrase) {
+    auto &opks = m_keyBundle->opks;
+    const auto it = std::ranges::find_if(
+        opks, [&](const auto &kp) { return kp.pub == opkPub; });
+    if (it == opks.end())
+      return;
+    OPENSSL_cleanse(it->priv.data(), it->priv.size());
+    opks.erase(it);
+    keystoreSave(m_keyPath, *m_keyBundle, passphrase);
+  }
+
   // Generates new OPKs, persists the bundle, and returns the public keys
   std::vector<std::vector<uint8_t>>
   replenishOneTimePrekeys(const std::size_t count,
@@ -50,6 +65,15 @@ public:
     }
     keystoreSave(m_keyPath, *m_keyBundle, passphrase);
     return pubs;
+  }
+
+  // Generates a new SPK, signs it with the Ed25519 IK
+  std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
+  rotateSPK(const std::string &passphrase) {
+    m_keyBundle->spk = x25519Generate();
+    m_keyBundle->spkSig = ed25519Sign(m_keyBundle->ik.priv, m_keyBundle->spk.pub);
+    keystoreSave(m_keyPath, *m_keyBundle, passphrase);
+    return {m_keyBundle->spk.pub, m_keyBundle->spkSig};
   }
 
 private:

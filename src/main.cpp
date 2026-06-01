@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <openssl/crypto.h>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -374,6 +375,8 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
   state.pollActive = true;
   state.pollThread = std::thread([&] {
     int contactTick = 0;
+    int spkRotateTick = 0;
+    static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
     while (state.pollActive) {
       std::this_thread::sleep_for(std::chrono::seconds(5));
       if (!state.pollActive)
@@ -386,7 +389,8 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
           receiveDirectMessages(api, state.ratchets, state.messageStore,
                                 lu.getAccessToken(), lu.getKeyBundle().ikX,
                                 lu.getKeyBundle().spk, lu.getKeyBundle().opks,
-                                lu.getKeyBundle().pq);
+                                lu.getKeyBundle().pq, *state.localUser,
+                                state.loginPassword);
         } else if (state.viewingGroup && state.selectedGroupId >= 0) {
           receiveGroupMessages(api, state.groupRatchets, state.messageStore,
                                lu.getAccessToken(), state.selectedGroupId,
@@ -407,12 +411,21 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
               }
               const int32_t gid = g.value("id", 0);
               const int32_t epoch = g.value("epoch", 0);
-              // Warn if epoch changed — server may have modified membership
+              // Epoch change means membership changed — re-key the group
               if (state.knownGroupEpochs.contains(gid) &&
-                  state.knownGroupEpochs.at(gid) != epoch)
+                  state.knownGroupEpochs.at(gid) != epoch) {
                 state.statusMsg =
                     "⚠ Group " + g.value("name", std::to_string(gid)) +
                     " membership changed — verify members out-of-band";
+                // Cleanse and drop old sender key so postGroupSenderKey re-keys
+                if (state.groupSenderKeys.contains(gid)) {
+                  auto &sk = state.groupSenderKeys.at(gid);
+                  OPENSSL_cleanse(sk.data(), sk.size());
+                  state.groupSenderKeys.erase(gid);
+                }
+                // Drop old group ratchets — they used the old sender key
+                state.groupRatchets.erase(gid);
+              }
               state.knownGroupEpochs[gid] = epoch;
               state.groups.emplace_back(gid, g.value("name", ""),
                                         std::move(members), epoch);
@@ -433,6 +446,22 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
                                  state.skdmTracker);
             }
           }
+        }
+        if (++spkRotateTick >= SPK_ROTATE_INTERVAL && state.localUser) {
+          spkRotateTick = 0;
+          const auto [newSpkPub, newSpkSig] =
+              state.localUser->rotateSPK(state.loginPassword);
+          std::vector<std::string> opkPubs;
+          std::ranges::transform(
+              state.localUser->getKeyBundle().opks,
+              std::back_inserter(opkPubs),
+              [](const RawKeyPair &k) { return base64Encode(k.pub); });
+          const auto &kb = state.localUser->getKeyBundle();
+          api.publishKeyBundle(
+              state.localUser->getAccessToken(), base64Encode(kb.ik.pub),
+              base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
+              base64Encode(newSpkPub), base64Encode(newSpkSig), opkPubs,
+              base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
         }
         scr.PostEvent(Event::Custom);
       } catch (...) {
@@ -645,7 +674,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                                 state.localUser->getKeyBundle().ikX,
                                 state.localUser->getKeyBundle().spk,
                                 state.localUser->getKeyBundle().opks,
-                                state.localUser->getKeyBundle().pq);
+                                state.localUser->getKeyBundle().pq,
+                                *state.localUser, state.loginPassword);
         } catch (...) {
         }
       }

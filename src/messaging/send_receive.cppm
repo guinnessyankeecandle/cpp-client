@@ -157,7 +157,9 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
                                   const RawKeyPair &myIkX,
                                   const RawKeyPair &mySpk,
                                   const std::vector<RawKeyPair> &myOpks,
-                                  const RawKeyPair &myPq) {
+                                  const RawKeyPair &myPq,
+                                  LocalUser &localUser,
+                                  const std::string &passphrase) {
   auto messages = api.listMessages(accessToken);
   if (!messages.is_array())
     return;
@@ -209,6 +211,8 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
       ratchets.insert_or_assign(otherUserId,
                                 RatchetState::initReceiver(sessionKey, mySpk));
       OPENSSL_cleanse(sessionKey.data(), sessionKey.size());
+      if (hdr.usedOpkPub)
+        localUser.consumeOneTimePrekey(*hdr.usedOpkPub, passphrase);
     } else if (!ratchets.contains(otherUserId)) {
       continue;
     }
@@ -225,12 +229,12 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
           std::move(encHeader),
           base64Decode(msg.at("ciphertext").get<std::string>())};
       auto [plain, epoch, seq] = ratchet.decrypt(rmsg);
-
       store.add(Message{id, otherUserId,
                         msg.at("ciphertext").get<std::string>(),
                         msg.at("ratchet_header_enc").get<std::string>(),
                         BaseMessage::Direction::Received, epoch, seq,
                         std::string(plain.begin(), plain.end())});
+      api.acknowledgeReceipt(accessToken, id);
     } catch (...) {
     }
   }
@@ -441,6 +445,7 @@ export void receiveGroupMessages(const ApiClient &api,
                              m.value("ciphertext", ""),
                              BaseMessage::Direction::Received, iter,
                              std::string(plain.begin(), plain.end())});
+      api.acknowledgeGroupReceipt(accessToken, groupId, id);
     } catch (...) {
     }
   }
