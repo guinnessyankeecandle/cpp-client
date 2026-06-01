@@ -102,6 +102,19 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
 static void stopPolling(AppState &state);
 static void openIdentityOverlay(AppState &state);
 
+// Publishes the local user's full key bundle to the server.
+static void publishBundle(const ApiClient &api, const LocalUser &user) {
+  const auto &kb = user.getKeyBundle();
+  std::vector<std::string> opkPubs;
+  std::ranges::transform(kb.opks, std::back_inserter(opkPubs),
+                         [](const RawKeyPair &k) { return base64Encode(k.pub); });
+  api.publishKeyBundle(user.getAccessToken(), base64Encode(kb.ik.pub),
+                       base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
+                       base64Encode(kb.spk.pub), base64Encode(kb.spkSig),
+                       opkPubs, base64Encode(kb.pq.pub),
+                       base64Encode(kb.pqSig));
+}
+
 Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
   auto btnRegister = Button(" Register ", [&] {
     state.screen = AppScreen::Register;
@@ -183,17 +196,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
                               tokens["access_token"].get<std::string>(),
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.regPassword);
-      std::vector<std::string> opkPubs;
-      std::ranges::transform(
-          state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
-          [](const RawKeyPair &k) { return base64Encode(k.pub); });
-      const auto &kb = state.localUser->getKeyBundle();
-      api.publishKeyBundle(state.localUser->getAccessToken(),
-                           base64Encode(kb.ik.pub), base64Encode(kb.ikX.pub),
-                           base64Encode(kb.ikXSig), base64Encode(kb.spk.pub),
-                           base64Encode(kb.spkSig), opkPubs,
-                           base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
-
+      publishBundle(api, *state.localUser);
       state.screen = AppScreen::Main;
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
@@ -296,18 +299,8 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
                               tokens["access_token"].get<std::string>(),
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.loginPassword);
-      if (isNewDevice) {
-        std::vector<std::string> opkPubs;
-        std::ranges::transform(
-            state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
-            [](const RawKeyPair &k) { return base64Encode(k.pub); });
-        const auto &kb = state.localUser->getKeyBundle();
-        api.publishKeyBundle(state.localUser->getAccessToken(),
-                             base64Encode(kb.ik.pub), base64Encode(kb.ikX.pub),
-                             base64Encode(kb.ikXSig), base64Encode(kb.spk.pub),
-                             base64Encode(kb.spkSig), opkPubs,
-                             base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
-      }
+      if (isNewDevice)
+        publishBundle(api, *state.localUser);
 
       const auto countRes =
           api.getPrekeysCount(state.localUser->getAccessToken());
@@ -448,18 +441,8 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
         }
         if (++spkRotateTick >= SPK_ROTATE_INTERVAL && state.localUser) {
           spkRotateTick = 0;
-          const auto [newSpkPub, newSpkSig] =
-              state.localUser->rotateSPK(state.loginPassword);
-          std::vector<std::string> opkPubs;
-          std::ranges::transform(
-              state.localUser->getKeyBundle().opks, std::back_inserter(opkPubs),
-              [](const RawKeyPair &k) { return base64Encode(k.pub); });
-          const auto &kb = state.localUser->getKeyBundle();
-          api.publishKeyBundle(
-              state.localUser->getAccessToken(), base64Encode(kb.ik.pub),
-              base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
-              base64Encode(newSpkPub), base64Encode(newSpkSig), opkPubs,
-              base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
+          state.localUser->rotateSPK(state.loginPassword);
+          publishBundle(api, *state.localUser);
         }
         scr.PostEvent(Event::Custom);
       } catch (...) {

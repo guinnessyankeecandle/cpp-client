@@ -158,8 +158,8 @@ public:
     ratchet_state.m_sendingKeyPair = x25519Generate();
     ratchet_state.m_remotePublicKey = bobSpkPub;
     // All four initial header keys derived from SK — matches Signal spec
-    ratchet_state.m_sendHeaderKey     = hkdf(sk, {}, "ratchet-hks",  KEY_BYTES);
-    ratchet_state.m_recvHeaderKey     = hkdf(sk, {}, "ratchet-hkr",  KEY_BYTES);
+    ratchet_state.m_sendHeaderKey = hkdf(sk, {}, "ratchet-hks", KEY_BYTES);
+    ratchet_state.m_recvHeaderKey = hkdf(sk, {}, "ratchet-hkr", KEY_BYTES);
     ratchet_state.m_nextSendHeaderKey = hkdf(sk, {}, "ratchet-nhks", KEY_BYTES);
     ratchet_state.m_nextRecvHeaderKey = hkdf(sk, {}, "ratchet-nhkr", KEY_BYTES);
     auto [rk, cks, nhk_ignored] =
@@ -176,8 +176,8 @@ public:
     ratchet_state.m_sendingKeyPair = signed_pre_key;
     ratchet_state.m_rootKey = sk;
     // Symmetric to sender — recv/send swapped
-    ratchet_state.m_recvHeaderKey     = hkdf(sk, {}, "ratchet-hks",  KEY_BYTES);
-    ratchet_state.m_sendHeaderKey     = hkdf(sk, {}, "ratchet-hkr",  KEY_BYTES);
+    ratchet_state.m_recvHeaderKey = hkdf(sk, {}, "ratchet-hks", KEY_BYTES);
+    ratchet_state.m_sendHeaderKey = hkdf(sk, {}, "ratchet-hkr", KEY_BYTES);
     ratchet_state.m_nextRecvHeaderKey = hkdf(sk, {}, "ratchet-nhks", KEY_BYTES);
     ratchet_state.m_nextSendHeaderKey = hkdf(sk, {}, "ratchet-nhkr", KEY_BYTES);
     return ratchet_state;
@@ -274,7 +274,8 @@ private:
   std::vector<uint8_t> m_recvHeaderKey;
   std::vector<uint8_t> m_nextSendHeaderKey;
   std::vector<uint8_t> m_nextRecvHeaderKey;
-  std::vector<uint8_t> m_pendingNextRecvHK; // kdfRk NHK, promoted on lazy HK advance
+  std::vector<uint8_t>
+      m_pendingNextRecvHK; // kdfRk NHK, promoted on lazy HK advance
   std::vector<uint8_t> m_sendChainKey;
   std::vector<uint8_t> m_recvChainKey;
   uint32_t m_sendCount{0};
@@ -355,8 +356,7 @@ private:
     return out;
   }
 
-  [[nodiscard]] RatchetHeader
-  decryptHeader(const std::vector<uint8_t> &hdrCt) {
+  [[nodiscard]] RatchetHeader decryptHeader(const std::vector<uint8_t> &hdrCt) {
     const auto pkt = unpackAead(hdrCt);
     std::vector<uint8_t> bytes;
     try {

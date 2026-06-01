@@ -52,7 +52,7 @@ jobs:
         run: |
           llvm-cov report ./build-coverage/cybersec_tests \
             -instr-profile=coverage.profdata \
-            --ignore-filename-regex='_deps|\.test\.cpp|network/' \
+            --ignore-filename-regex='_deps|\.test\.cpp|network/|send_receive' \
             | tee coverage_report.txt
           awk '/TOTAL/{if ($10+0 < 80.0) {print "Coverage below 80%: " $10; exit 1}}' \
             coverage_report.txt

@@ -76,13 +76,13 @@ TEST_CASE("LocalUser consumeOneTimePrekey removes key", "[local_user]") {
   u.consumeOneTimePrekey(opkPub, "pass");
   REQUIRE(u.getKeyBundle().opks.size() == before - 1);
   const auto &opks = u.getKeyBundle().opks;
-  REQUIRE(std::ranges::none_of(opks, [&](const auto &kp) {
-    return kp.pub == opkPub;
-  }));
+  REQUIRE(std::ranges::none_of(
+      opks, [&](const auto &kp) { return kp.pub == opkPub; }));
   std::filesystem::remove(TEST_KEY_PATH);
 }
 
-TEST_CASE("LocalUser consumeOneTimePrekey unknown key is no-op", "[local_user]") {
+TEST_CASE("LocalUser consumeOneTimePrekey unknown key is no-op",
+          "[local_user]") {
   std::filesystem::remove(TEST_KEY_PATH);
   LocalUser u{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
   const std::size_t before = u.getKeyBundle().opks.size();

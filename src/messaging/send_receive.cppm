@@ -352,13 +352,11 @@ postGroupSenderKey(const ApiClient &api, const std::string &accessToken,
   tracker.recordPosted(groupId, epoch);
 }
 
-export void fetchAndApplySkdms(const ApiClient &api,
-                               const std::string &accessToken, const int32_t groupId,
-                               const RawKeyPair &myIkX, const RawKeyPair &mySpk,
-                               const std::vector<RawKeyPair> &myOpks,
-                               const RawKeyPair &myPq,
-                               GroupRatchetMap &groupRatchets,
-                               const SkdmEpochTracker &tracker) {
+export void fetchAndApplySkdms(
+    const ApiClient &api, const std::string &accessToken, const int32_t groupId,
+    const RawKeyPair &myIkX, const RawKeyPair &mySpk,
+    const std::vector<RawKeyPair> &myOpks, const RawKeyPair &myPq,
+    GroupRatchetMap &groupRatchets, const SkdmEpochTracker &tracker) {
   const auto skdms = api.fetchSkdm(accessToken, groupId);
   if (!skdms.is_array())
     return;
@@ -408,21 +406,21 @@ sendGroupMessage(const ApiClient &api, const GroupSenderKeys &senderKeys,
 
   const auto groupInfo = api.getGroup(accessToken, groupId);
   const int32_t epoch = groupInfo.at("epoch").get<int32_t>();
-  const auto result =
-      api.sendGroupMessage(accessToken, groupId, epoch, base64Encode(encrypted_rachet));
+  const auto result = api.sendGroupMessage(accessToken, groupId, epoch,
+                                           base64Encode(encrypted_rachet));
   if (!result.contains("id"))
     throw std::runtime_error("sendGroupMessage: server response missing 'id'");
   const int32_t msgId = result.at("id").get<int32_t>();
-  store.add(GroupMessage{msgId, groupId, epoch, myUserId, base64Encode(encrypted_rachet),
+  store.add(GroupMessage{msgId, groupId, epoch, myUserId,
+                         base64Encode(encrypted_rachet),
                          BaseMessage::Direction::Sent, sentIter, plaintext});
   return {msgId};
 }
 
-export void receiveGroupMessages(const ApiClient &api,
-                                 GroupRatchetMap &groupRatchets,
-                                 MessageStore &store,
-                                 const std::string &accessToken,
-                                 const int32_t groupId, const int32_t myUserId) {
+export void
+receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRatchets,
+                     MessageStore &store, const std::string &accessToken,
+                     const int32_t groupId, const int32_t myUserId) {
   auto msgs = api.listGroupMessages(accessToken, groupId);
   if (!msgs.is_array())
     return;
@@ -447,8 +445,8 @@ export void receiveGroupMessages(const ApiClient &api,
       auto &ratchet = groupRatchets.at(groupId).at(senderId);
       auto wire = base64Decode(m.at("ciphertext").get<std::string>());
       auto [plain, iter] = ratchet.decrypt(wire);
-      store.add(GroupMessage{id, groupId, m.at("epoch").get<int32_t>(), senderId,
-                             m.at("ciphertext").get<std::string>(),
+      store.add(GroupMessage{id, groupId, m.at("epoch").get<int32_t>(),
+                             senderId, m.at("ciphertext").get<std::string>(),
                              BaseMessage::Direction::Received, iter,
                              std::string(plain.begin(), plain.end())});
       api.acknowledgeGroupReceipt(accessToken, groupId, id);
