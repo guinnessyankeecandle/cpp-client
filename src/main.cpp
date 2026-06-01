@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <ranges>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -10,6 +9,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <memory>
 #include <openssl/crypto.h>
+#include <ranges>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -21,6 +21,10 @@ import securemsg.messaging;
 import securemsg.network;
 
 using namespace ftxui;
+
+static constexpr int DIALOG_MIN_WIDTH = 52;
+static constexpr int MAIN_PANEL_MIN_WIDTH = 60;
+static constexpr int INPUT_LINE_HEIGHT = 1;
 
 enum class AppScreen { Welcome, Register, Login, Main };
 
@@ -108,8 +112,8 @@ static void publishBundle(const ApiClient &api, const LocalUser &user) {
   const auto &kb = user.getKeyBundle();
   std::vector<std::string> opkPubs;
   opkPubs.reserve(kb.opks.size());
-  for (const auto &k : kb.opks)
-    opkPubs.push_back(base64Encode(k.pub));
+  std::ranges::transform(kb.opks, std::back_inserter(opkPubs),
+                         [](const auto &k) { return base64Encode(k.pub); });
   api.publishKeyBundle(user.getAccessToken(), base64Encode(kb.ik.pub),
                        base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
                        base64Encode(kb.spk.pub), base64Encode(kb.spkSig),
@@ -141,7 +145,7 @@ Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
                       hbox({filler(), btnRegister->Render(), text("  "),
                             btnLogin->Render(), filler()}),
                   }) | border |
-                      size(WIDTH, GREATER_THAN, 52),
+                      size(WIDTH, GREATER_THAN, DIALOG_MIN_WIDTH),
                   filler()}),
             filler(),
         });
@@ -151,8 +155,8 @@ Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
 Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
                              const ApiClient &api) {
   auto rUser = Input(&state.regUsername, "username");
-  auto rPass = Input(&state.regPassword, "password",
-                     InputOption{.transform = {}, .password = true});
+  auto rPass =
+      Input(&state.regPassword, "password", InputOption{.password = true});
   auto tCode = Input(&state.regTotpCode, "6-digit code");
 
   auto btnSubmit = Button(" Register ", [&] {
@@ -174,7 +178,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
       const auto [clientPublic, clientProof] =
           srp.computeProof(state.regUsername, state.regPassword,
                            init["srp_salt"], init["server_public"]);
-      auto verify = api.srpVerify(init["session_id"], clientPublic, clientProof);
+      auto verify =
+          api.srpVerify(init["session_id"], clientPublic, clientProof);
       if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
         state.regStatus = "Server proof invalid.";
         return;
@@ -195,7 +200,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
     }
     try {
       auto tokens = api.verify2FA(state.loginPreAuthToken, state.regTotpCode);
-      state.localUser.emplace(tokens.at("user_id").get<int32_t>(), state.regUsername,
+      state.localUser.emplace(tokens.at("user_id").get<int32_t>(),
+                              state.regUsername,
                               tokens["access_token"].get<std::string>(),
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.regPassword);
@@ -224,9 +230,13 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
         Elements body = {
             text(" Register ") | bold | center,
             separator(),
-            hbox({text(" Username : "), rUser->Render() | flex | size(HEIGHT, EQUAL, 1)}),
+            hbox({text(" Username : "),
+                  rUser->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
             separator(),
-            hbox({text(" Password : "), rPass->Render() | flex | size(HEIGHT, EQUAL, 1)}),
+            hbox({text(" Password : "),
+                  rPass->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
         };
         if (!state.regShowTotp) {
           body.push_back(separator());
@@ -243,7 +253,9 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
           if (!state.regTotpUri.empty())
             body.push_back(qrElement(state.regTotpUri) | center);
           body.push_back(separator());
-          body.push_back(hbox({text(" TOTP Code : "), tCode->Render() | flex | size(HEIGHT, EQUAL, 1)}));
+          body.push_back(hbox({text(" TOTP Code : "),
+                               tCode->Render() | flex |
+                                   size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}));
           body.push_back(separator());
           body.push_back(hbox({filler(), btnVerifyTotp->Render(), text("  "),
                                btnBack->Render(), filler()}));
@@ -253,7 +265,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
         return vbox({filler(),
                      hbox({filler(),
                            vbox(std::move(body)) | border |
-                               size(WIDTH, GREATER_THAN, 52),
+                               size(WIDTH, GREATER_THAN, DIALOG_MIN_WIDTH),
                            filler()}),
                      filler()});
       });
@@ -262,8 +274,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
 Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
                           const ApiClient &api) {
   auto lUser = Input(&state.loginUsername, "username");
-  auto lPass = Input(&state.loginPassword, "password",
-                     InputOption{.transform = {}, .password = true});
+  auto lPass =
+      Input(&state.loginPassword, "password", InputOption{.password = true});
   auto tCode = Input(&state.loginTotpCode, "6-digit code");
 
   auto btnLogin = Button(" Login ", [&] {
@@ -278,7 +290,8 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
       const auto [clientPublic, clientProof] =
           srp.computeProof(state.loginUsername, state.loginPassword,
                            init["srp_salt"], init["server_public"]);
-      auto verify = api.srpVerify(init["session_id"], clientPublic, clientProof);
+      auto verify =
+          api.srpVerify(init["session_id"], clientPublic, clientProof);
       if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
         state.loginStatus = "ERROR: Server proof invalid -- possible MITM!";
         return;
@@ -300,7 +313,8 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
     try {
       auto tokens = api.verify2FA(state.loginPreAuthToken, state.loginTotpCode);
       const bool isNewDevice = !std::filesystem::exists("identity.key");
-      state.localUser.emplace(tokens.at("user_id").get<int32_t>(), state.loginUsername,
+      state.localUser.emplace(tokens.at("user_id").get<int32_t>(),
+                              state.loginUsername,
                               tokens["access_token"].get<std::string>(),
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.loginPassword);
@@ -309,7 +323,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
 
       const auto countRes =
           api.getPrekeysCount(state.localUser->getAccessToken());
-      if (countRes.value("count", 0) < 10) {
+      if (countRes.at("count").get<int32_t>() < 10) {
         const auto newOpkPubs =
             state.localUser->replenishOneTimePrekeys(20U, state.loginPassword);
         std::vector<std::string> newOpkPubsB64;
@@ -339,9 +353,13 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
         Elements body = {
             text(" Login ") | bold | center,
             separator(),
-            hbox({text(" Username : "), lUser->Render() | flex | size(HEIGHT, EQUAL, 1)}),
+            hbox({text(" Username : "),
+                  lUser->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
             separator(),
-            hbox({text(" Password : "), lPass->Render() | flex | size(HEIGHT, EQUAL, 1)}),
+            hbox({text(" Password : "),
+                  lPass->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
         };
         if (!state.loginShowTotp) {
           body.push_back(separator());
@@ -351,7 +369,9 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
             body.push_back(text(" " + state.loginStatus) | color(Color::Red));
         } else {
           body.push_back(separator());
-          body.push_back(hbox({text(" TOTP Code : "), tCode->Render() | flex | size(HEIGHT, EQUAL, 1)}));
+          body.push_back(hbox({text(" TOTP Code : "),
+                               tCode->Render() | flex |
+                                   size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}));
           body.push_back(separator());
           body.push_back(hbox({filler(), btnVerify->Render(), text("  "),
                                btnBack->Render(), filler()}));
@@ -362,7 +382,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
         return vbox({filler(),
                      hbox({filler(),
                            vbox(std::move(body)) | border |
-                               size(WIDTH, GREATER_THAN, 52),
+                               size(WIDTH, GREATER_THAN, DIALOG_MIN_WIDTH),
                            filler()}),
                      filler()});
       });
@@ -777,7 +797,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         return vbox({filler(),
                      hbox({filler(),
                            vbox(std::move(body)) | border |
-                               size(WIDTH, GREATER_THAN, 60),
+                               size(WIDTH, GREATER_THAN, MAIN_PANEL_MIN_WIDTH),
                            filler()}),
                      filler()});
       });
