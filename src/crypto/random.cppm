@@ -1,5 +1,6 @@
 module;
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <openssl/crypto.h>
@@ -98,4 +99,11 @@ export std::vector<uint8_t> base64Decode(const std::string &encoded) {
   const std::size_t padding = std::ranges::count(encoded, '=');
   out.resize(static_cast<std::size_t>(len) - padding);
   return out;
+}
+
+export uint64_t nowMs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
 }

@@ -5,14 +5,13 @@ module;
 #include <ranges>
 #include <stdexcept>
 #include <unordered_map>
-#include <variant>
+#include <utility>
 #include <vector>
 export module securemsg.messaging.store;
 import securemsg.messaging.message;
 
-export using AnyMessage = std::variant<Message, GroupMessage>;
-
-using SeqKey = std::pair<uint32_t, uint32_t>; // (chainEpoch, seqInChain)
+// (timestampMs, messageId) — timestamp orders, messageId breaks ties uniquely
+using MsgKey = std::pair<uint64_t, int32_t>;
 
 export class MessageStore {
 public:
@@ -20,22 +19,18 @@ public:
     const auto userId = msg.getUserId();
     const auto id = msg.getId();
     auto &bucket = m_direct[userId];
-    if (std::ranges::any_of(bucket | std::views::values,
-                            [id](const auto &m) { return m.getId() == id; }))
+    if (containsDirect(userId, id))
       throw std::invalid_argument("Duplicate direct message ID");
-    bucket.emplace(SeqKey{msg.getChainEpoch(), msg.getSeqInChain()},
-                   std::move(msg));
+    bucket.emplace(MsgKey{msg.getTimestampMs(), msg.getId()}, std::move(msg));
   }
 
   void add(GroupMessage msg) {
     const auto groupId = msg.getGroupId();
     const auto id = msg.getId();
     auto &bucket = m_groups[groupId];
-    if (std::ranges::any_of(bucket | std::views::values,
-                            [id](const auto &m) { return m.getId() == id; }))
+    if (containsGroup(groupId, id))
       throw std::invalid_argument("Duplicate group message ID");
-    bucket.emplace(SeqKey{msg.getChainEpoch(), msg.getSeqInChain()},
-                   std::move(msg));
+    bucket.emplace(MsgKey{msg.getTimestampMs(), msg.getId()}, std::move(msg));
   }
 
   [[nodiscard]] bool containsDirect(const int32_t userId,
@@ -54,7 +49,7 @@ public:
                                [id](const auto &m) { return m.getId() == id; });
   }
 
-  // Returns messages in sender-intended order (chainEpoch, seqInChain)
+  // Returns messages in client-encrypted send-time order, ties broken by ID
   [[nodiscard]] std::vector<Message> getByUser(const int32_t userId) const {
     const auto uit = m_direct.find(userId);
     if (uit == m_direct.end())
@@ -66,7 +61,7 @@ public:
     return result;
   }
 
-  // Returns messages in sender-intended order (groupEpoch, senderKeyIteration)
+  // Returns messages in client-encrypted send-time order, ties broken by ID
   [[nodiscard]] std::vector<GroupMessage>
   getByGroup(const int32_t groupId) const {
     const auto group_it = m_groups.find(groupId);
@@ -85,6 +80,6 @@ public:
   }
 
 private:
-  std::unordered_map<int32_t, std::map<SeqKey, Message>> m_direct;
-  std::unordered_map<int32_t, std::map<SeqKey, GroupMessage>> m_groups;
+  std::unordered_map<int32_t, std::map<MsgKey, Message>> m_direct;
+  std::unordered_map<int32_t, std::map<MsgKey, GroupMessage>> m_groups;
 };

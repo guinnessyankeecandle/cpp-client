@@ -16,9 +16,9 @@ import securemsg.crypto.aead;
 import securemsg.crypto.kdf;
 
 static constexpr uint32_t RATCHET_MAX_SKIP = 1000;
-// header: X25519 pub + prevChainLen (4 bytes) + messageIndex (4 bytes)
+// header: X25519 pub + prevChainLen + messageIndex + timestampMs
 static constexpr std::size_t HEADER_COUNTER_BYTES =
-    sizeof(uint32_t) * 2; // prevChainLen + messageIndex
+    sizeof(uint32_t) * 2 + sizeof(uint64_t);
 static constexpr std::size_t HEADER_BYTES_GROUP =
     X25519_KEY_BYTES + HEADER_COUNTER_BYTES;
 
@@ -26,6 +26,7 @@ export struct RatchetHeader {
   std::vector<uint8_t> dhPub;
   uint32_t prevChainLen{0};
   uint32_t messageIndex{0};
+  uint64_t timestampMs{0};
 };
 
 export struct RatchetMessage {
@@ -77,7 +78,6 @@ public:
 
   struct DecryptResult {
     std::vector<uint8_t> plaintext;
-    uint32_t iteration;
   };
 
   DecryptResult decrypt(const std::vector<uint8_t> &wire) {
@@ -94,7 +94,7 @@ public:
       m_MKSKIPPED.erase(it);
       auto plain = aeadDecrypt(unpackAead(body), mk);
       OPENSSL_cleanse(mk.data(), mk.size());
-      return {std::move(plain), iter};
+      return {std::move(plain)};
     }
 
     // Finds cases where messages were skipped and then found
@@ -126,7 +126,7 @@ public:
 
     auto plain = aeadDecrypt(unpackAead(body), messageMk);
     OPENSSL_cleanse(messageMk.data(), messageMk.size());
-    return {std::move(plain), iter};
+    return {std::move(plain)};
   }
 
   ~SenderKeyRatchetState() {
@@ -190,7 +190,8 @@ public:
     auto [newSendChainKey, mk] = kdfCk(m_sendChainKey);
     m_sendChainKey = std::move(newSendChainKey);
 
-    const RatchetHeader hdr{m_sendingKeyPair.pub, m_prevSendCount, m_sendCount};
+    const RatchetHeader hdr{m_sendingKeyPair.pub, m_prevSendCount, m_sendCount,
+                            nowMs()};
     m_sendCount++;
 
     const auto hdrBytes = serializeHeader(hdr);
@@ -202,13 +203,9 @@ public:
     return {packAead(hdrPkt), packAead(bodyPkt)};
   }
 
-  [[nodiscard]] uint32_t getEpoch() const { return m_dhRatchetEpoch; }
-  [[nodiscard]] uint32_t getNextSendSeq() const { return m_sendCount; }
-
   struct DecryptResult {
     std::vector<uint8_t> plaintext;
-    uint32_t chainEpoch; // increments on each DH ratchet step
-    uint32_t seqInChain; // message number within this chain (= header.n)
+    uint64_t timestampMs; // client-set send time, encrypted in header
   };
 
   DecryptResult decrypt(const RatchetMessage &msg) {
@@ -227,11 +224,9 @@ public:
       auto plain = aeadDecrypt(pkt, mk);
       OPENSSL_cleanse(mk.data(), mk.size());
       m_processed.insert(msgKey);
-      // Recover the epoch recorded when this DH key was first seen
       if (!m_dhPubToEpoch.contains(hdr.dhPub))
         throw std::runtime_error("Skipped message has unknown DH epoch");
-      const uint32_t epoch = m_dhPubToEpoch.at(hdr.dhPub);
-      return {std::move(plain), epoch, hdr.messageIndex};
+      return {std::move(plain), hdr.timestampMs};
     }
 
     // New DH public key means the sender ratcheted; advance our side to match
@@ -248,7 +243,7 @@ public:
     auto plain = aeadDecrypt(pkt, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
     m_processed.insert(msgKey);
-    return {std::move(plain), m_dhRatchetEpoch, hdr.messageIndex};
+    return {std::move(plain), hdr.timestampMs};
   }
 
   ~RatchetState() {
@@ -349,10 +344,12 @@ private:
   static std::vector<uint8_t> serializeHeader(const RatchetHeader &hdr) {
     std::vector<uint8_t> out(HEADER_BYTES_GROUP);
     std::ranges::copy(hdr.dhPub, out.begin());
-    std::memcpy(out.data() + X25519_KEY_BYTES, &hdr.prevChainLen,
-                sizeof(uint32_t));
-    std::memcpy(out.data() + X25519_KEY_BYTES + sizeof(uint32_t),
-                &hdr.messageIndex, sizeof(uint32_t));
+    std::size_t off = X25519_KEY_BYTES;
+    std::memcpy(out.data() + off, &hdr.prevChainLen, sizeof(uint32_t));
+    off += sizeof(uint32_t);
+    std::memcpy(out.data() + off, &hdr.messageIndex, sizeof(uint32_t));
+    off += sizeof(uint32_t);
+    std::memcpy(out.data() + off, &hdr.timestampMs, sizeof(uint64_t));
     return out;
   }
 
@@ -377,12 +374,12 @@ private:
 
     RatchetHeader hdr;
     hdr.dhPub.assign(bytes.begin(), bytes.begin() + X25519_KEY_BYTES);
-
-    std::memcpy(&hdr.prevChainLen, bytes.data() + X25519_KEY_BYTES,
-                sizeof(uint32_t));
-    std::memcpy(&hdr.messageIndex,
-                bytes.data() + X25519_KEY_BYTES + sizeof(uint32_t),
-                sizeof(uint32_t));
+    std::size_t off = X25519_KEY_BYTES;
+    std::memcpy(&hdr.prevChainLen, bytes.data() + off, sizeof(uint32_t));
+    off += sizeof(uint32_t);
+    std::memcpy(&hdr.messageIndex, bytes.data() + off, sizeof(uint32_t));
+    off += sizeof(uint32_t);
+    std::memcpy(&hdr.timestampMs, bytes.data() + off, sizeof(uint64_t));
     return hdr;
   }
 };

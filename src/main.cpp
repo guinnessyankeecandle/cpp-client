@@ -517,23 +517,31 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto btnSend = Button(" Send ", [&] {
     if (state.composeText.empty())
       return;
+
     try {
       if (!state.localUser)
         return;
+
       if (!state.viewingGroup && state.selectedContactId >= 0) {
         sendDirectMessage(api, state.ratchets, state.messageStore,
                           state.localUser->getAccessToken(),
                           state.selectedContactId, state.composeText,
                           state.localUser->getKeyBundle().ikX,
                           state.contactCache);
+
       } else if (state.viewingGroup && state.selectedGroupId >= 0) {
         sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
                          state.messageStore, state.localUser->getAccessToken(),
                          state.selectedGroupId, state.localUser->getId(),
                          state.composeText);
+
+      } else {
+        throw std::runtime_error("No contact or group selected");
       }
+
       state.composeText.clear();
       scr.PostEvent(Event::Custom);
+
     } catch (const std::exception &e) {
       state.statusMsg = "Send error: " + std::string(e.what());
     }

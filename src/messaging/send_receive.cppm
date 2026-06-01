@@ -137,8 +137,6 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
   }
 
   auto &ratchet = ratchets.at(recipientId);
-  const uint32_t sendEpoch = ratchet.getEpoch();
-  const uint32_t sendSeq = ratchet.getNextSendSeq();
   const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
   auto msg = ratchet.encrypt(plaintextBytes);
 
@@ -156,7 +154,7 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
 
   store.add(Message{msgId, recipientId, base64Encode(msg.ciphertext),
                     base64Encode(packedHeader), BaseMessage::Direction::Sent,
-                    sendEpoch, sendSeq, plaintext});
+                    nowMs(), plaintext});
   return {msgId};
 }
 
@@ -236,11 +234,11 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
       RatchetMessage rmsg{
           std::move(encHeader),
           base64Decode(msg.at("ciphertext").get<std::string>())};
-      auto [plain, epoch, seq] = ratchet.decrypt(rmsg);
+      auto [plain, tsMs] = ratchet.decrypt(rmsg);
       store.add(Message{id, otherUserId,
                         msg.at("ciphertext").get<std::string>(),
                         msg.at("ratchet_header_enc").get<std::string>(),
-                        BaseMessage::Direction::Received, epoch, seq,
+                        BaseMessage::Direction::Received, tsMs,
                         std::string(plain.begin(), plain.end())});
       api.acknowledgeReceipt(accessToken, id);
     } catch (...) {
@@ -411,9 +409,9 @@ sendGroupMessage(const ApiClient &api, const GroupSenderKeys &senderKeys,
   if (!result.contains("id"))
     throw std::runtime_error("sendGroupMessage: server response missing 'id'");
   const int32_t msgId = result.at("id").get<int32_t>();
-  store.add(GroupMessage{msgId, groupId, epoch, myUserId,
+  store.add(GroupMessage{msgId, groupId, myUserId,
                          base64Encode(encrypted_rachet),
-                         BaseMessage::Direction::Sent, sentIter, plaintext});
+                         BaseMessage::Direction::Sent, nowMs(), plaintext});
   return {msgId};
 }
 
@@ -444,10 +442,10 @@ receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRatchets,
     try {
       auto &ratchet = groupRatchets.at(groupId).at(senderId);
       auto wire = base64Decode(m.at("ciphertext").get<std::string>());
-      auto [plain, iter] = ratchet.decrypt(wire);
-      store.add(GroupMessage{id, groupId, m.at("epoch").get<int32_t>(),
-                             senderId, m.at("ciphertext").get<std::string>(),
-                             BaseMessage::Direction::Received, iter,
+      auto [plain] = ratchet.decrypt(wire);
+      store.add(GroupMessage{id, groupId, senderId,
+                             m.at("ciphertext").get<std::string>(),
+                             BaseMessage::Direction::Received, nowMs(),
                              std::string(plain.begin(), plain.end())});
       api.acknowledgeGroupReceipt(accessToken, groupId, id);
     } catch (...) {

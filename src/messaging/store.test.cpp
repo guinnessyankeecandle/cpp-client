@@ -3,14 +3,13 @@ import securemsg.messaging.store;
 import securemsg.messaging.message;
 
 static Message makeMsg(const int32_t id, const int32_t userId = 1,
-                       const uint32_t seq = 0) {
-  return {id, userId, "ct", "hdr", BaseMessage::Direction::Received,
-          0,  seq,    ""};
+                       const uint64_t tsMs = 0) {
+  return {id, userId, "ct", "hdr", BaseMessage::Direction::Received, tsMs, ""};
 }
 
 static GroupMessage makeGrpMsg(const int32_t id, const int32_t groupId = 10,
-                               const uint32_t seq = 0) {
-  return {id, groupId, 0, 2, "ct", BaseMessage::Direction::Received, seq, ""};
+                               const uint64_t tsMs = 0) {
+  return {id, groupId, 2, "ct", BaseMessage::Direction::Received, tsMs, ""};
 }
 
 TEST_CASE("MessageStore add direct and retrieve by user", "[store]") {
@@ -33,11 +32,11 @@ TEST_CASE("MessageStore add group and retrieve by group", "[store]") {
   REQUIRE(s.getByGroup(99).empty());
 }
 
-TEST_CASE("MessageStore getByUser returns in sequence order", "[store]") {
+TEST_CASE("MessageStore getByUser returns in timestamp order", "[store]") {
   MessageStore s;
-  s.add(makeMsg(3, 42, 2));
+  s.add(makeMsg(3, 42, 2000));
   s.add(makeMsg(1, 42, 0));
-  s.add(makeMsg(2, 42, 1));
+  s.add(makeMsg(2, 42, 1000));
   const auto msgs = s.getByUser(42);
   REQUIRE(msgs[0].getId() == 1);
   REQUIRE(msgs[1].getId() == 2);
@@ -54,7 +53,7 @@ TEST_CASE("MessageStore containsDirect uses userId", "[store]") {
 TEST_CASE("MessageStore containsGroup uses groupId", "[store]") {
   MessageStore s;
   s.add(makeGrpMsg(1, 10, 0));
-  s.add(makeGrpMsg(1, 20, 0));
+  s.add(makeGrpMsg(1, 20, 1));
   REQUIRE(s.containsGroup(10, 1));
   REQUIRE(s.containsGroup(20, 1));
   REQUIRE_FALSE(s.containsGroup(99, 1));
