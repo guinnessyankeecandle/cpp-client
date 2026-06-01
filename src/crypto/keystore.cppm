@@ -17,8 +17,8 @@ import securemsg.crypto.x25519;
 import securemsg.crypto.mlkem;
 
 export struct KeyBundle {
-  RawKeyPair ik;         // Ed25519 — signing only (IK_ed)
-  RawKeyPair ikX;        // X25519 — long-term DH identity key (IK_x, like Signal's IK)
+  RawKeyPair ik;  // Ed25519 — signing only (IK_ed)
+  RawKeyPair ikX; // X25519 — long-term DH identity key (IK_x, like Signal's IK)
   std::vector<uint8_t> ikXSig; // ed25519Sign(ik, ikX.pub) — binds ikX to ik
   RawKeyPair spk;
   std::vector<uint8_t> spkSig;

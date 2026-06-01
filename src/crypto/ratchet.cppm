@@ -19,7 +19,7 @@ static constexpr uint32_t RATCHET_MAX_SKIP = 1000;
 // header: X25519 pub + prevChainLen (4 bytes) + messageIndex (4 bytes)
 static constexpr std::size_t HEADER_COUNTER_BYTES =
     sizeof(uint32_t) * 2; // prevChainLen + messageIndex
-static constexpr std::size_t HEADER_BYTES =
+static constexpr std::size_t HEADER_BYTES_GROUP =
     X25519_KEY_BYTES + HEADER_COUNTER_BYTES;
 
 export struct RatchetHeader {
@@ -346,7 +346,7 @@ private:
   }
 
   static std::vector<uint8_t> serializeHeader(const RatchetHeader &hdr) {
-    std::vector<uint8_t> out(HEADER_BYTES);
+    std::vector<uint8_t> out(HEADER_BYTES_GROUP);
     std::ranges::copy(hdr.dhPub, out.begin());
     std::memcpy(out.data() + X25519_KEY_BYTES, &hdr.prevChainLen,
                 sizeof(uint32_t));
@@ -372,7 +372,7 @@ private:
       }
     }
 
-    if (bytes.size() < HEADER_BYTES)
+    if (bytes.size() < HEADER_BYTES_GROUP)
       throw std::runtime_error("Header too short");
 
     RatchetHeader hdr;

@@ -37,7 +37,7 @@ public:
 
   [[nodiscard]] const KeyBundle &getKeyBundle() const { return *m_keyBundle; }
 
-  // Removes the OPK with the given public key after it has been consumed by PQXDH.
+  // Removes the OPK with the given public key
   void consumeOneTimePrekey(const std::vector<uint8_t> &opkPub,
                             const std::string &passphrase) {
     auto &opks = m_keyBundle->opks;
@@ -71,7 +71,8 @@ public:
   std::pair<std::vector<uint8_t>, std::vector<uint8_t>>
   rotateSPK(const std::string &passphrase) {
     m_keyBundle->spk = x25519Generate();
-    m_keyBundle->spkSig = ed25519Sign(m_keyBundle->ik.priv, m_keyBundle->spk.pub);
+    m_keyBundle->spkSig =
+        ed25519Sign(m_keyBundle->ik.priv, m_keyBundle->spk.pub);
     keystoreSave(m_keyPath, *m_keyBundle, passphrase);
     return {m_keyBundle->spk.pub, m_keyBundle->spkSig};
   }

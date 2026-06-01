@@ -15,7 +15,7 @@ import securemsg.crypto.kdf;
 export struct RemoteKeyBundle {
   // Ed25519 pub — used for signature verification
   std::vector<uint8_t> ikEdPub;
-  std::vector<uint8_t> ikXPub;  // X25519 IK pub — used for DH2
+  std::vector<uint8_t> ikXPub; // X25519 IK pub — used for DH2
   std::vector<uint8_t> ikXSig;
   std::vector<uint8_t> spkPub;
   std::vector<uint8_t> spkSig;
@@ -31,7 +31,8 @@ export struct PqxdhSenderResult {
 };
 
 export struct PqxdhInitialHeader {
-  std::vector<uint8_t> senderIkXPub; // sender's long-term X25519 IK pub (for DH1)
+  std::vector<uint8_t>
+      senderIkXPub; // sender's long-term X25519 IK pub (for DH1)
   std::vector<uint8_t> ephemeralPub;
   std::vector<uint8_t> pqCiphertext;
   std::optional<std::vector<uint8_t>> usedOpkPub; // which OPK the sender used
@@ -51,9 +52,9 @@ export PqxdhSenderResult pqxdhSend(const RawKeyPair &senderIkX,
     throw std::runtime_error("PQXDH: PQ prekey signature invalid");
 
   auto ek = x25519Generate();
-  auto dh1 = x25519DH(senderIkX.priv, remote.spkPub); // sender IK_x × receiver SPK
-  auto dh2 =
-      x25519DH(ek.priv, remote.ikXPub); // sender EK × receiver IK_x
+  auto dh1 =
+      x25519DH(senderIkX.priv, remote.spkPub); // sender IK_x × receiver SPK
+  auto dh2 = x25519DH(ek.priv, remote.ikXPub); // sender EK × receiver IK_x
   auto dh3 = x25519DH(ek.priv, remote.spkPub); // sender EK × receiver SPK
   auto [pqCt, pqSs] = mlkemEncap(remote.pqPub);
 
@@ -86,9 +87,12 @@ pqxdhReceive(const RawKeyPair &receiverIkX, const RawKeyPair &receiverSpk,
              const std::vector<RawKeyPair> &receiverOpks,
              const RawKeyPair &receiverPq, const PqxdhInitialHeader &header) {
 
-  auto dh1 = x25519DH(receiverSpk.priv, header.senderIkXPub); // receiver SPK × sender IK_x
-  auto dh2 = x25519DH(receiverIkX.priv, header.ephemeralPub); // receiver IK_x × sender EK
-  auto dh3 = x25519DH(receiverSpk.priv, header.ephemeralPub); // receiver SPK × sender EK
+  auto dh1 = x25519DH(receiverSpk.priv,
+                      header.senderIkXPub); // receiver SPK × sender IK_x
+  auto dh2 = x25519DH(receiverIkX.priv,
+                      header.ephemeralPub); // receiver IK_x × sender EK
+  auto dh3 = x25519DH(receiverSpk.priv,
+                      header.ephemeralPub); // receiver SPK × sender EK
   auto pqSs = mlkemDecap(receiverPq.priv, header.pqCiphertext);
 
   std::vector<uint8_t> ikm;

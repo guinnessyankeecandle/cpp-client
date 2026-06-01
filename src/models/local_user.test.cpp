@@ -66,3 +66,40 @@ TEST_CASE("LocalUser replenishOneTimePrekeys persists keys", "[local_user]") {
   REQUIRE(u.getKeyBundle().opks.size() == before + 3);
   std::filesystem::remove(TEST_KEY_PATH);
 }
+
+TEST_CASE("LocalUser consumeOneTimePrekey removes key", "[local_user]") {
+  std::filesystem::remove(TEST_KEY_PATH);
+  LocalUser u{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
+  const std::size_t before = u.getKeyBundle().opks.size();
+  REQUIRE(before > 0);
+  const auto opkPub = u.getKeyBundle().opks.front().pub;
+  u.consumeOneTimePrekey(opkPub, "pass");
+  REQUIRE(u.getKeyBundle().opks.size() == before - 1);
+  const auto &opks = u.getKeyBundle().opks;
+  REQUIRE(std::ranges::none_of(opks, [&](const auto &kp) {
+    return kp.pub == opkPub;
+  }));
+  std::filesystem::remove(TEST_KEY_PATH);
+}
+
+TEST_CASE("LocalUser consumeOneTimePrekey unknown key is no-op", "[local_user]") {
+  std::filesystem::remove(TEST_KEY_PATH);
+  LocalUser u{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
+  const std::size_t before = u.getKeyBundle().opks.size();
+  const std::vector<uint8_t> unknown(32, 0xFF);
+  u.consumeOneTimePrekey(unknown, "pass");
+  REQUIRE(u.getKeyBundle().opks.size() == before);
+  std::filesystem::remove(TEST_KEY_PATH);
+}
+
+TEST_CASE("LocalUser rotateSPK produces new key", "[local_user]") {
+  std::filesystem::remove(TEST_KEY_PATH);
+  LocalUser u{1, "alice", "acc", "ref", TEST_KEY_PATH, "pass"};
+  const auto oldSpk = u.getKeyBundle().spk.pub;
+  const auto [newPub, newSig] = u.rotateSPK("pass");
+  REQUIRE(newPub != oldSpk);
+  REQUIRE(newPub.size() == 32);
+  REQUIRE(newSig.size() == 64);
+  REQUIRE(u.getKeyBundle().spk.pub == newPub);
+  std::filesystem::remove(TEST_KEY_PATH);
+}

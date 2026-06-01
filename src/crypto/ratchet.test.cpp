@@ -130,3 +130,14 @@ TEST_CASE("Ratchet replayed message throws", "[ratchet]") {
   bob.decrypt(msg);
   REQUIRE_THROWS_AS(bob.decrypt(msg), std::runtime_error);
 }
+
+TEST_CASE("Ratchet header keys rotate after bidirectional exchange", "[ratchet]") {
+  auto [alice, bob] = makeAliceBob();
+  // Multiple messages in each direction to exercise header key rotation
+  for (uint8_t i = 0; i < 3; ++i)
+    REQUIRE(bob.decrypt(alice.encrypt({i})).plaintext == std::vector<uint8_t>{i});
+  for (uint8_t i = 0; i < 3; ++i)
+    REQUIRE(alice.decrypt(bob.encrypt({i})).plaintext == std::vector<uint8_t>{i});
+  for (uint8_t i = 0; i < 3; ++i)
+    REQUIRE(bob.decrypt(alice.encrypt({i})).plaintext == std::vector<uint8_t>{i});
+}

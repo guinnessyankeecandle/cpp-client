@@ -52,15 +52,12 @@ public:
   }
 
   // ── Keys ─────────────────────────────────────────────────────────────────
-  void publishKeyBundle(const std::string &accessToken,
-                        const std::string &identityPubB64,
-                        const std::string &identityXPubB64,
-                        const std::string &identityXSigB64,
-                        const std::string &spkPubB64,
-                        const std::string &spkSigB64,
-                        const std::vector<std::string> &opkPubsB64,
-                        const std::string &pqPubB64,
-                        const std::string &pqSigB64) const {
+  void publishKeyBundle(
+      const std::string &accessToken, const std::string &identityPubB64,
+      const std::string &identityXPubB64, const std::string &identityXSigB64,
+      const std::string &spkPubB64, const std::string &spkSigB64,
+      const std::vector<std::string> &opkPubsB64, const std::string &pqPubB64,
+      const std::string &pqSigB64) const {
     (void)m_http.post("/keys/bundle",
                       {{"identity_pub", identityPubB64},
                        {"identity_x_pub", identityXPubB64},
