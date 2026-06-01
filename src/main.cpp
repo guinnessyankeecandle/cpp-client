@@ -23,6 +23,7 @@ import securemsg.network;
 using namespace ftxui;
 
 static constexpr int DIALOG_MIN_WIDTH = 52;
+static constexpr const char *DELETE_LABEL = " \U0001f5d1 ";
 static constexpr int MAIN_PANEL_MIN_WIDTH = 60;
 static constexpr int INPUT_LINE_HEIGHT = 1;
 
@@ -97,8 +98,6 @@ static Element qrElement(const std::string &uri) {
     rows.push_back(text(line));
   return vbox(std::move(rows));
 }
-
-static void openIdentityOverlay(AppState &state);
 
 // Publishes the local user's full key bundle to the server.
 static void publishBundle(const ApiClient &api, const LocalUser &user) {
@@ -579,7 +578,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     }
     if (msgSelected >= static_cast<int>(msgIds->size()))
       msgSelected = std::max(0, static_cast<int>(msgIds->size()) - 1);
-    state.selectedMsgId = msgIds->empty() ? -1 : msgIds->at(msgSelected);
+    state.selectedMsgId = msgIds->empty() ? -1 : (*msgIds)[msgSelected];
   };
 
   auto btnSend = Button(" Send ", [&] {
@@ -619,23 +618,22 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   MenuOption msgMenuOpt;
   msgMenuOpt.on_change = [&] {
     if (msgSelected >= 0 && msgSelected < static_cast<int>(msgIds->size()))
-      state.selectedMsgId = msgIds->at(msgSelected);
+      state.selectedMsgId = (*msgIds)[msgSelected];
   };
   auto msgMenu = Menu(msgLabels.get(), &msgSelected, msgMenuOpt);
 
-  auto btnDelete = Button(" \U0001f5d1 ", [&] {
+  auto btnDelete = Button(DELETE_LABEL, [&] {
     if (!state.localUser || state.selectedMsgId < 0)
       return;
+
     try {
       const bool sent = msgSelected >= 0 &&
                         msgSelected < static_cast<int>(msgSent->size()) &&
-                        msgSent->at(msgSelected);
+                        (*msgSent)[msgSelected];
       if (sent)
         api.revokeMessage(state.localUser->getAccessToken(),
                           state.selectedMsgId);
-      else
-        api.acknowledgeReceipt(state.localUser->getAccessToken(),
-                               state.selectedMsgId);
+
       if (state.viewingGroup)
         state.messageStore->removeGroupMessage(state.selectedGroupId,
                                                state.selectedMsgId);
@@ -658,7 +656,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     allLabels->clear();
     std::ranges::transform(
         state.contacts, std::back_inserter(*allLabels), [](const auto &c) {
-          return std::string(c.isVerified() ? "v " : "  ") + c.getUsername();
+          return std::string(c.isVerified() ? "✓ " : "  ") + c.getUsername();
         });
     std::ranges::transform(state.groups, std::back_inserter(*allLabels),
                            [](const auto &g) { return "  " + g.getName(); });
@@ -667,8 +665,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
   MenuOption menuOpt;
   menuOpt.on_enter = [&] {
-    const int ci = static_cast<int>(state.contacts.size());
-    if (menuSelected < ci) {
+    if (menuSelected < 0)
+      return;
+    // Get the index (is it a group or user)
+    const int contactCount = static_cast<int>(state.contacts.size());
+    if (menuSelected < contactCount) {
+      // selected item is a contact — direct index into contacts
       state.selectedContactId = state.contacts.at(menuSelected).getId();
       state.viewingGroup = false;
       if (state.localUser) {
@@ -683,8 +685,13 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         } catch (...) {
         }
       }
-    } else if (menuSelected - ci < static_cast<int>(state.groups.size())) {
-      state.selectedGroupId = state.groups.at(menuSelected - ci).getId();
+    } else {
+
+      // selected item is a group — subtract contacts offset to get group index
+      const int groupIndex = menuSelected - contactCount;
+      if (groupIndex >= static_cast<int>(state.groups.size()))
+        throw std::runtime_error("menu selection out of range");
+      state.selectedGroupId = state.groups.at(groupIndex).getId();
       state.viewingGroup = true;
     }
     rebuildMsgLabels();
@@ -694,12 +701,21 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto leftMenu = Menu(allLabels.get(), &menuSelected, menuOpt);
   const auto leftPanel = Renderer(leftMenu, [&, leftMenu] {
     rebuildLabels();
-    return vbox({
-               text(" Contacts / Groups ") | bold | center,
-               separator(),
-               leftMenu->Render() | flex,
-           }) |
-           border;
+    const int contactCount = static_cast<int>(state.contacts.size());
+    const int groupCount = static_cast<int>(state.groups.size());
+    Elements left;
+    left.push_back(text(" Contacts ") | bold | center);
+    left.push_back(separator());
+    for (int i = 0; i < contactCount; ++i)
+      left.push_back(leftMenu->ChildAt(i)->Render());
+    if (groupCount > 0) {
+      left.push_back(separator());
+      left.push_back(text(" Groups ") | bold | center);
+      left.push_back(separator());
+      for (int i = contactCount; i < contactCount + groupCount; ++i)
+        left.push_back(leftMenu->ChildAt(i)->Render());
+    }
+    return vbox(std::move(left)) | flex | border;
   });
 
   const auto rightPanel = Renderer(
@@ -728,6 +744,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     state.showIdentityOverlay = false;
     scr.PostEvent(Event::Custom);
   });
+
   auto btnMarkVerified = Button(" Mark as verified ", [&] {
     if (state.selectedContactId >= 0) {
       const auto it =
@@ -778,7 +795,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                  tabIdx = state.showIdentityOverlay ? 1 : 0;
                  auto base = vbox({
                      hbox({text(" SecureMsg ") | bold, filler(),
-                           text(" [i] identity  [q] quit ") | dim}) |
+                           text(" [Ctrl+K] identity  [Ctrl+Q] quit ") | dim}) |
                          bgcolor(Color::Blue),
                      split->Render() | flex,
                  });
@@ -787,12 +804,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                  return dbox({base, overlayComp->Render()});
                }),
       [&](const Event &e) {
-        if (e == Event::Character('i')) {
+        if (e == Event::Special("\x0b")) { // Ctrl+K — open identity overlay
           openIdentityOverlay(state);
           scr.PostEvent(Event::Custom);
           return true;
         }
-        if (e == Event::Character('q')) {
+        if (e == Event::Special("\x11")) { // Ctrl+Q
           state.poller.reset();
           scr.ExitLoopClosure()();
           return true;

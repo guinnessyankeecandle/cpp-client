@@ -8,6 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
+# Conan provides SQLite::SQLite3; system FindSQLite3 provides SQLite3::SQLite3 — normalise to one name
+if(TARGET SQLite::SQLite3 AND NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+elseif(TARGET SQLite3::SQLite3 AND NOT TARGET SQLite::SQLite3)
+    add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
+endif()
 find_package(SqliteOrm QUIET)
 set(_botan_lib_hints
     /usr/lib64
@@ -124,7 +130,7 @@ target_sources(securemsg_messaging PUBLIC
         src/messaging/store.cppm
         src/messaging/send_receive.cppm
         src/messaging/messaging.cppm)
-target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm SQLite::SQLite3)
+target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm SQLite3::SQLite3)
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
 # ── Main binary ───────────────────────────────────────────────────────────────
@@ -143,6 +149,6 @@ if(TEST_SOURCES)
         ${TEST_SOURCES})
     target_link_libraries(cybersec_tests PRIVATE
         securemsg_models securemsg_crypto securemsg_network securemsg_messaging
-        sqlite_orm::sqlite_orm SQLite::SQLite3 Catch2::Catch2)
+        sqlite_orm::sqlite_orm SQLite3::SQLite3 Catch2::Catch2)
     add_test(NAME cybersec_tests COMMAND cybersec_tests)
 endif()
