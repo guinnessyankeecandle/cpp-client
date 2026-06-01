@@ -188,9 +188,10 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
           [](const RawKeyPair &k) { return base64Encode(k.pub); });
       const auto &kb = state.localUser->getKeyBundle();
       api.publishKeyBundle(state.localUser->getAccessToken(),
-                           base64Encode(kb.ik.pub), base64Encode(kb.spk.pub),
-                           base64Encode(kb.spkSig), opkPubs,
-                           base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
+                           base64Encode(kb.ik.pub), base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
+                           base64Encode(kb.spk.pub), base64Encode(kb.spkSig),
+                           opkPubs, base64Encode(kb.pq.pub),
+                           base64Encode(kb.pqSig));
 
       state.screen = AppScreen::Main;
       scr.PostEvent(Event::Custom);
@@ -301,9 +302,10 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
             [](const RawKeyPair &k) { return base64Encode(k.pub); });
         const auto &kb = state.localUser->getKeyBundle();
         api.publishKeyBundle(state.localUser->getAccessToken(),
-                             base64Encode(kb.ik.pub), base64Encode(kb.spk.pub),
-                             base64Encode(kb.spkSig), opkPubs,
-                             base64Encode(kb.pq.pub), base64Encode(kb.pqSig));
+                             base64Encode(kb.ik.pub), base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
+                             base64Encode(kb.spk.pub), base64Encode(kb.spkSig),
+                             opkPubs, base64Encode(kb.pq.pub),
+                             base64Encode(kb.pqSig));
       }
 
       const auto countRes =
@@ -382,7 +384,7 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
         const auto &lu = *state.localUser;
         if (state.selectedContactId >= 0 && !state.viewingGroup) {
           receiveDirectMessages(api, state.ratchets, state.messageStore,
-                                lu.getAccessToken(), lu.getKeyBundle().ik,
+                                lu.getAccessToken(), lu.getKeyBundle().ikX,
                                 lu.getKeyBundle().spk, lu.getKeyBundle().opks,
                                 lu.getKeyBundle().pq);
         } else if (state.viewingGroup && state.selectedGroupId >= 0) {
@@ -419,14 +421,15 @@ static void startPolling(AppState &state, ScreenInteractive &scr,
               if (!state.groupSenderKeys.contains(gid)) {
                 const auto &kb = lu.getKeyBundle();
                 postGroupSenderKey(api, lu.getAccessToken(), gid,
-                                   state.groups.back().getMembers(), kb.ik,
+                                   state.groups.back().getMembers(), kb.ikX,
                                    state.groupSenderKeys, state.skdmTracker);
               }
 
               // Fetch sender keys from other members
               const auto &kb = lu.getKeyBundle();
-              fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ik, kb.spk,
-                                 kb.opks, kb.pq, state.groupRatchets,
+              fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ikX, kb.spk,
+                                 kb.opks,
+                                 kb.pq, state.groupRatchets,
                                  state.skdmTracker);
             }
           }
@@ -492,8 +495,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         sendDirectMessage(api, state.ratchets, state.messageStore,
                           state.localUser->getAccessToken(),
                           state.selectedContactId, state.composeText,
-                          state.localUser->getKeyBundle().spk,
-                          state.contactCache);
+                          state.localUser->getKeyBundle().ikX, state.contactCache);
       } else if (state.viewingGroup && state.selectedGroupId >= 0) {
         sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
                          state.messageStore, state.localUser->getAccessToken(),
@@ -527,8 +529,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       }
       sendDirectMessage(api, state.ratchets, state.messageStore,
                         state.localUser->getAccessToken(), recipientId,
-                        it->getPlaintext(), state.localUser->getKeyBundle().spk,
-                        state.contactCache);
+                        it->getPlaintext(), state.localUser->getKeyBundle().ikX, state.contactCache);
       state.statusMsg = "Forwarded.";
       state.forwardToId.clear();
       scr.PostEvent(Event::Custom);
@@ -641,7 +642,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         try {
           receiveDirectMessages(api, state.ratchets, state.messageStore,
                                 state.localUser->getAccessToken(),
-                                state.localUser->getKeyBundle().ik,
+                                state.localUser->getKeyBundle().ikX,
                                 state.localUser->getKeyBundle().spk,
                                 state.localUser->getKeyBundle().opks,
                                 state.localUser->getKeyBundle().pq);

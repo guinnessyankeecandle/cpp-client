@@ -17,7 +17,9 @@ import securemsg.crypto.x25519;
 import securemsg.crypto.mlkem;
 
 export struct KeyBundle {
-  RawKeyPair ik;
+  RawKeyPair ik;         // Ed25519 — signing only (IK_ed)
+  RawKeyPair ikX;        // X25519 — long-term DH identity key (IK_x, like Signal's IK)
+  std::vector<uint8_t> ikXSig; // ed25519Sign(ik, ikX.pub) — binds ikX to ik
   RawKeyPair spk;
   std::vector<uint8_t> spkSig;
   RawKeyPair pq;
@@ -31,6 +33,8 @@ static constexpr int OPK_BATCH_SIZE = 20;
 export KeyBundle keystoreGenerate() {
   KeyBundle kb;
   kb.ik = ed25519Generate();
+  kb.ikX = x25519Generate();
+  kb.ikXSig = ed25519Sign(kb.ik.priv, kb.ikX.pub);
   kb.spk = x25519Generate();
   kb.spkSig = ed25519Sign(kb.ik.priv, kb.spk.pub);
   kb.pq = mlkemGenerate();
@@ -49,6 +53,9 @@ export void keystoreSave(const std::string &path, const KeyBundle &kb,
   };
   append(kb.ik.priv);
   append(kb.ik.pub);
+  append(kb.ikX.priv);
+  append(kb.ikX.pub);
+  append(kb.ikXSig);
   append(kb.spk.priv);
   append(kb.spk.pub);
   append(kb.spkSig);
@@ -117,6 +124,9 @@ export KeyBundle keystoreLoad(const std::string &path,
   KeyBundle kb;
   kb.ik.priv = read(ED25519_PRIV_BYTES);
   kb.ik.pub = read(ED25519_PUB_BYTES);
+  kb.ikX.priv = read(X25519_KEY_BYTES);
+  kb.ikX.pub = read(X25519_KEY_BYTES);
+  kb.ikXSig = read(ED25519_SIG_BYTES);
   kb.spk.priv = read(X25519_KEY_BYTES);
   kb.spk.pub = read(X25519_KEY_BYTES);
   kb.spkSig = read(ED25519_SIG_BYTES);

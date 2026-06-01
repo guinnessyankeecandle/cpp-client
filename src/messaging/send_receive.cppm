@@ -63,6 +63,33 @@ packRatchetHeader(const std::vector<uint8_t> &encryptedHeader) {
   return out;
 }
 
+static RemoteKeyBundle parseKeyBundle(const nlohmann::json &bundle) {
+  static constexpr std::array required{"identity_pub", "identity_x_pub",
+                                       "identity_x_sig",
+                                       "signed_prekey_pub", "signed_prekey_sig",
+                                       "pq_prekey_pub", "pq_prekey_sig"};
+  for (const auto *field : required)
+    if (!bundle.contains(field))
+      throw std::runtime_error(std::string("Key bundle missing field: ") +
+                               field);
+
+  const auto ikEdPub = base64Decode(bundle.at("identity_pub").get<std::string>());
+  const auto ikXPub = base64Decode(bundle.at("identity_x_pub").get<std::string>());
+  const auto ikXSig = base64Decode(bundle.at("identity_x_sig").get<std::string>());
+  const auto spkPub =
+      base64Decode(bundle.at("signed_prekey_pub").get<std::string>());
+  const auto spkSig =
+      base64Decode(bundle.at("signed_prekey_sig").get<std::string>());
+  const auto pqPub = base64Decode(bundle.at("pq_prekey_pub").get<std::string>());
+  const auto pqSig = base64Decode(bundle.at("pq_prekey_sig").get<std::string>());
+
+  std::optional<std::vector<uint8_t>> opkPub;
+  if (bundle.contains("one_time_prekey") && !bundle["one_time_prekey"].is_null())
+    opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
+
+  return {ikEdPub, ikXPub, ikXSig, spkPub, spkSig, opkPub, pqPub, pqSig};
+}
+
 // Direct messaging
 
 export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
@@ -70,7 +97,7 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
                                     const std::string &accessToken,
                                     int32_t recipientId,
                                     const std::string &plaintext,
-                                    const RawKeyPair &senderIk,
+                                    const RawKeyPair &senderIkX,
                                     const std::vector<Contact> &contactCache) {
 
   std::optional<PqxdhSenderResult> pqxdhResult;
@@ -78,38 +105,24 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
   std::optional<std::vector<uint8_t>> pqxdhUsedOpkPub;
 
   if (!ratchets.contains(recipientId)) {
-    auto bundle = api.getKeyBundle(accessToken, recipientId);
-
-    auto ikEdPub = base64Decode(bundle.at("identity_pub").get<std::string>());
-    auto ikXPub = base64Decode(bundle.at("identity_x_pub").get<std::string>());
-    auto spkPub =
-        base64Decode(bundle.at("signed_prekey_pub").get<std::string>());
-    auto spkSig =
-        base64Decode(bundle.at("signed_prekey_sig").get<std::string>());
-    auto pqPub = base64Decode(bundle.at("pq_prekey_pub").get<std::string>());
-    auto pqSig = base64Decode(bundle.at("pq_prekey_sig").get<std::string>());
-
-    std::optional<std::vector<uint8_t>> opkPub;
-    if (bundle.contains("one_time_prekey") &&
-        !bundle["one_time_prekey"].is_null())
-      opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
+    const auto remote =
+        parseKeyBundle(api.getKeyBundle(accessToken, recipientId));
 
     const auto it = std::ranges::find_if(
         contactCache, [&](const auto &c) { return c.getId() == recipientId; });
     if (it != contactCache.end() &&
-        CRYPTO_memcmp(it->getIdentityPub().data(), ikEdPub.data(),
-                      ikEdPub.size()) != 0)
+        CRYPTO_memcmp(it->getIdentityPub().data(), remote.ikEdPub.data(),
+                      remote.ikEdPub.size()) != 0)
       throw std::runtime_error("Identity key mismatch for user " +
                                std::to_string(recipientId));
 
-    pqxdhUsedOpkPub = opkPub;
-    pqxdhSenderIkXPub = senderIk.pub;
-    RemoteKeyBundle remote{ikEdPub, ikXPub, spkPub, spkSig,
-                           opkPub,  pqPub,  pqSig};
+    pqxdhUsedOpkPub = remote.opkPub;
+    pqxdhSenderIkXPub = senderIkX.pub;
 
-    pqxdhResult = pqxdhSend(senderIk, remote);
+    pqxdhResult = pqxdhSend(senderIkX, remote);
     ratchets.emplace(recipientId,
-                     RatchetState::initSender(pqxdhResult->sessionKey, spkPub));
+                     RatchetState::initSender(pqxdhResult->sessionKey,
+                                              remote.spkPub));
     OPENSSL_cleanse(pqxdhResult->sessionKey.data(),
                     pqxdhResult->sessionKey.size());
   }
@@ -141,7 +154,7 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
 export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
                                   MessageStore &store,
                                   const std::string &accessToken,
-                                  const RawKeyPair &myIk,
+                                  const RawKeyPair &myIkX,
                                   const RawKeyPair &mySpk,
                                   const std::vector<RawKeyPair> &myOpks,
                                   const RawKeyPair &myPq) {
@@ -192,7 +205,7 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
                               [](const uint8_t bit) { return bit != 0; }))
         hdr.usedOpkPub = std::move(opkField);
 
-      auto sessionKey = pqxdhReceive(myIk, mySpk, myOpks, myPq, hdr);
+      auto sessionKey = pqxdhReceive(myIkX, mySpk, myOpks, myPq, hdr);
       ratchets.insert_or_assign(otherUserId,
                                 RatchetState::initReceiver(sessionKey, mySpk));
       OPENSSL_cleanse(sessionKey.data(), sessionKey.size());
@@ -250,35 +263,24 @@ private:
 
 // ── Group messaging
 
-// Distribute our sender key to a new group member via X3DH-style encryption.
-// Returns the base64-encoded SKDM payload for that member.
 export std::string encryptSkdmForMember(const ApiClient &api,
                                         const std::string &accessToken,
-                                        int32_t memberId,
-                                        const RawKeyPair &senderIk,
+                                        const int32_t memberId,
+                                        const RawKeyPair &senderIkX,
                                         const std::vector<uint8_t> &senderKey) {
-  auto bundle = api.getKeyBundle(accessToken, memberId);
-  auto ikEdPub = base64Decode(bundle.at("identity_pub").get<std::string>());
-  auto ikXPub = base64Decode(bundle.at("identity_x_pub").get<std::string>());
-  auto spkPub = base64Decode(bundle.at("signed_prekey_pub").get<std::string>());
-  auto spkSig = base64Decode(bundle.at("signed_prekey_sig").get<std::string>());
-  auto pqPub = base64Decode(bundle.at("pq_prekey_pub").get<std::string>());
-  auto pqSig = base64Decode(bundle.at("pq_prekey_sig").get<std::string>());
-  std::optional<std::vector<uint8_t>> opkPub;
-  if (bundle.contains("one_time_prekey") &&
-      !bundle["one_time_prekey"].is_null())
-    opkPub = base64Decode(bundle["one_time_prekey"].get<std::string>());
 
-  RemoteKeyBundle remote{ikEdPub, ikXPub, spkPub, spkSig, opkPub, pqPub, pqSig};
-  auto pqxdhResult = pqxdhSend(senderIk, remote);
+  const auto remote =
+      parseKeyBundle(api.getKeyBundle(accessToken, memberId));
+  auto pqxdhResult = pqxdhSend(senderIkX, remote);
 
   // Encrypt the 64-byte sender key with the derived session key
-  auto pkt = aeadEncrypt(senderKey, pqxdhResult.sessionKey);
+  const auto pkt = aeadEncrypt(senderKey, pqxdhResult.sessionKey);
+  OPENSSL_cleanse(pqxdhResult.sessionKey.data(), pqxdhResult.sessionKey.size());
   auto packed = packAead(pkt);
 
   // Payload: senderEdPub(32) + ephemeralPub(32) + pqCiphertext + packed_aead
   std::vector<uint8_t> payload;
-  payload.insert(payload.end(), senderIk.pub.begin(), senderIk.pub.end());
+  payload.insert(payload.end(), senderIkX.pub.begin(), senderIkX.pub.end());
   payload.insert(payload.end(), pqxdhResult.ephemeralPub.begin(),
                  pqxdhResult.ephemeralPub.end());
   payload.insert(payload.end(), pqxdhResult.pqCiphertext.begin(),
@@ -291,8 +293,8 @@ export std::string encryptSkdmForMember(const ApiClient &api,
 // Payload: senderIkXPub(32) + ephemeralPub(32) + pqCiphertext(1568) +
 // packed_aead
 static std::vector<uint8_t>
-decryptSkdmPayload(const std::vector<uint8_t> &payload, const RawKeyPair &myIk,
-                   const RawKeyPair &mySpk,
+decryptSkdmPayload(const std::vector<uint8_t> &payload,
+                   const RawKeyPair &myIkX, const RawKeyPair &mySpk,
                    const std::vector<RawKeyPair> &myOpks,
                    const RawKeyPair &myPq) {
   constexpr std::size_t HEADER_BYTES =
@@ -312,7 +314,7 @@ decryptSkdmPayload(const std::vector<uint8_t> &payload, const RawKeyPair &myIk,
                           payload.begin() + off + MLKEM1024_PUB_BYTES);
   off += static_cast<std::ptrdiff_t>(MLKEM1024_PUB_BYTES);
 
-  auto sessionKey = pqxdhReceive(myIk, mySpk, myOpks, myPq, hdr);
+  auto sessionKey = pqxdhReceive(myIkX, mySpk, myOpks, myPq, hdr);
   const std::vector<uint8_t> packed(payload.begin() + off, payload.end());
   auto senderKey = aeadDecrypt(unpackAead(packed), sessionKey);
   OPENSSL_cleanse(sessionKey.data(), sessionKey.size());
@@ -324,7 +326,7 @@ decryptSkdmPayload(const std::vector<uint8_t> &payload, const RawKeyPair &myIk,
 export void
 postGroupSenderKey(const ApiClient &api, const std::string &accessToken,
                    const int32_t groupId, const std::vector<int32_t> &memberIds,
-                   const RawKeyPair &myIk, GroupSenderKeys &senderKeys,
+                   const RawKeyPair &myIkX, GroupSenderKeys &senderKeys,
                    SkdmEpochTracker &tracker) {
   const auto groupInfo = api.getGroup(accessToken, groupId);
   const int32_t epoch = groupInfo.value("epoch", 0);
@@ -335,7 +337,7 @@ postGroupSenderKey(const ApiClient &api, const std::string &accessToken,
   std::map<int32_t, std::string> skdms;
   for (const int32_t memberId : memberIds)
     skdms[memberId] =
-        encryptSkdmForMember(api, accessToken, memberId, myIk, senderKey);
+        encryptSkdmForMember(api, accessToken, memberId, myIkX, senderKey);
   OPENSSL_cleanse(senderKey.data(), senderKey.size());
 
   api.postSkdm(accessToken, groupId, skdms);
@@ -346,7 +348,8 @@ postGroupSenderKey(const ApiClient &api, const std::string &accessToken,
 // ratchets.
 export void fetchAndApplySkdms(const ApiClient &api,
                                const std::string &accessToken, int32_t groupId,
-                               const RawKeyPair &myIk, const RawKeyPair &mySpk,
+                               const RawKeyPair &myIkX,
+                               const RawKeyPair &mySpk,
                                const std::vector<RawKeyPair> &myOpks,
                                const RawKeyPair &myPq,
                                GroupRatchetMap &groupRatchets,
@@ -369,7 +372,7 @@ export void fetchAndApplySkdms(const ApiClient &api,
     try {
       const auto payload =
           base64Decode(entry.at("skdm_ciphertext").get<std::string>());
-      auto senderKey = decryptSkdmPayload(payload, myIk, mySpk, myOpks, myPq);
+      auto senderKey = decryptSkdmPayload(payload, myIkX, mySpk, myOpks, myPq);
       groupRatchets[groupId][senderId] = SenderKeyRatchetState::init(senderKey);
       OPENSSL_cleanse(senderKey.data(), senderKey.size());
     } catch (...) {
