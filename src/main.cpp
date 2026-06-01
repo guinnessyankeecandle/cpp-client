@@ -52,7 +52,7 @@ struct AppState {
   int32_t selectedContactId{-1};
   int32_t selectedGroupId{-1};
   bool viewingGroup{false};
-  MessageStore messageStore;
+  std::optional<MessageStore> messageStore;
   std::string composeText;
 
   int32_t selectedMsgId{-1};
@@ -199,6 +199,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.regPassword);
       publishBundle(api, *state.localUser);
+      state.messageStore =
+          MessageStore("messages.db", state.localUser->getDbKey());
       state.regShowTotp = false;
       state.regTotpUri.clear();
       state.screen = AppScreen::Main;
@@ -326,6 +328,8 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
       }
 
       state.contactCache = contactCacheLoad("known_identities.json");
+      state.messageStore =
+          MessageStore("messages.db", state.localUser->getDbKey());
       state.screen = AppScreen::Main;
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
@@ -399,14 +403,14 @@ struct Poller {
               const auto &lu = *state.localUser;
               if (state.selectedContactId >= 0 && !state.viewingGroup) {
                 receiveDirectMessages(
-                    api, state.ratchets, state.messageStore,
+                    api, state.ratchets, *state.messageStore,
                     lu.getAccessToken(), lu.getKeyBundle().ikX,
                     lu.getKeyBundle().spk, lu.getKeyBundle().opks,
                     lu.getKeyBundle().pq, *state.localUser,
                     state.loginPassword);
               } else if (state.viewingGroup && state.selectedGroupId >= 0) {
                 receiveGroupMessages(api, state.groupRatchets,
-                                     state.messageStore, lu.getAccessToken(),
+                                     *state.messageStore, lu.getAccessToken(),
                                      state.selectedGroupId, lu.getId());
               }
               state.msgsDirty = true;
@@ -532,7 +536,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       return it->getUsername();
     try {
       const auto res = api.lookupById(state.localUser->getAccessToken(), id);
-      const std::string name = res.at("username").get<std::string>();
+      auto name = res.at("username").get<std::string>();
       state.contacts.emplace_back(id, name, std::vector<uint8_t>{});
       return name;
     } catch (...) {
@@ -549,7 +553,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
     if (state.viewingGroup && state.selectedGroupId >= 0) {
       for (const auto &m :
-           state.messageStore.getByGroup(state.selectedGroupId)) {
+           state.messageStore->getByGroup(state.selectedGroupId)) {
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
         const std::string senderName =
             mine ? state.localUser->getUsername() : usernameById(m.getUserId());
@@ -562,7 +566,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       const std::string myName = state.localUser->getUsername();
       const std::string theirName = usernameById(state.selectedContactId);
       for (const auto &m :
-           state.messageStore.getByUser(state.selectedContactId)) {
+           state.messageStore->getByUser(state.selectedContactId)) {
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
         msgLabels->push_back(" " + (mine ? myName : theirName) + ": " +
                              m.getPlaintext());
@@ -587,7 +591,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         return;
 
       if (!state.viewingGroup && state.selectedContactId >= 0) {
-        sendDirectMessage(api, state.ratchets, state.messageStore,
+        sendDirectMessage(api, state.ratchets, *state.messageStore,
                           state.localUser->getAccessToken(),
                           state.selectedContactId, state.composeText,
                           state.localUser->getKeyBundle().ikX,
@@ -595,7 +599,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
       } else if (state.viewingGroup && state.selectedGroupId >= 0) {
         sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
-                         state.messageStore, state.localUser->getAccessToken(),
+                         *state.messageStore, state.localUser->getAccessToken(),
                          state.selectedGroupId, state.localUser->getId(),
                          state.composeText);
 
@@ -632,7 +636,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       else
         api.acknowledgeReceipt(state.localUser->getAccessToken(),
                                state.selectedMsgId);
-      state.messageStore.clear();
+      if (state.viewingGroup)
+        state.messageStore->removeGroupMessage(state.selectedGroupId,
+                                               state.selectedMsgId);
+      else
+        state.messageStore->removeDirectMessage(state.selectedContactId,
+                                                state.selectedMsgId);
       state.selectedMsgId = -1;
       rebuildMsgLabels();
       state.statusMsg = sent ? "Message revoked." : "Message deleted.";
@@ -662,10 +671,9 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     if (menuSelected < ci) {
       state.selectedContactId = state.contacts.at(menuSelected).getId();
       state.viewingGroup = false;
-      state.messageStore.clear();
       if (state.localUser) {
         try {
-          receiveDirectMessages(api, state.ratchets, state.messageStore,
+          receiveDirectMessages(api, state.ratchets, *state.messageStore,
                                 state.localUser->getAccessToken(),
                                 state.localUser->getKeyBundle().ikX,
                                 state.localUser->getKeyBundle().spk,
@@ -678,7 +686,6 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     } else if (menuSelected - ci < static_cast<int>(state.groups.size())) {
       state.selectedGroupId = state.groups.at(menuSelected - ci).getId();
       state.viewingGroup = true;
-      state.messageStore.clear();
     }
     rebuildMsgLabels();
     scr.PostEvent(Event::Custom);
@@ -806,21 +813,12 @@ int main() {
   auto login = makeLoginScreen(state, scr, api);
   auto mainScr = makeMainScreen(state, scr, api);
 
+  const std::array screens{welcome, reg, login, mainScr};
   const auto root = CatchEvent(
       Renderer(Container::Tab({welcome, reg, login, mainScr}, &screenIdx),
-               [&, welcome, reg, login, mainScr] {
+               [&, screens] {
                  screenIdx = static_cast<int>(state.screen);
-                 switch (state.screen) {
-                 case AppScreen::Welcome:
-                   return welcome->Render();
-                 case AppScreen::Register:
-                   return reg->Render();
-                 case AppScreen::Login:
-                   return login->Render();
-                 case AppScreen::Main:
-                   return mainScr->Render();
-                 }
-                 return text("");
+                 return screens.at(screenIdx)->Render();
                }),
       [](const Event &) { return false; });
 

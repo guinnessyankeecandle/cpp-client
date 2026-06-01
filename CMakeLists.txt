@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
+find_package(SQLite3 REQUIRED)
+find_package(SqliteOrm QUIET)
 set(_botan_lib_hints
     /usr/lib64
     /usr/lib/x86_64-linux-gnu
@@ -48,6 +50,7 @@ if(NOT botan_FOUND AND NOT Botan_FOUND)
 endif()
 
 include(FetchContent)
+
 
 find_package(nlohmann_json QUIET)
 if(NOT nlohmann_json_FOUND)
@@ -121,7 +124,7 @@ target_sources(securemsg_messaging PUBLIC
         src/messaging/store.cppm
         src/messaging/send_receive.cppm
         src/messaging/messaging.cppm)
-target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models)
+target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm SQLite::SQLite3)
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
 # ── Main binary ───────────────────────────────────────────────────────────────
@@ -140,6 +143,6 @@ if(TEST_SOURCES)
         ${TEST_SOURCES})
     target_link_libraries(cybersec_tests PRIVATE
         securemsg_models securemsg_crypto securemsg_network securemsg_messaging
-        Catch2::Catch2)
+        sqlite_orm::sqlite_orm SQLite::SQLite3 Catch2::Catch2)
     add_test(NAME cybersec_tests COMMAND cybersec_tests)
 endif()

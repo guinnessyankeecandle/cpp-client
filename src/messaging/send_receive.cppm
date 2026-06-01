@@ -103,7 +103,7 @@ static RemoteKeyBundle parseKeyBundle(const nlohmann::json &bundle) {
 // Direct messaging
 
 export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
-                                    MessageStore &store,
+                                    const MessageStore &store,
                                     const std::string &accessToken,
                                     int32_t recipientId,
                                     const std::string &plaintext,
@@ -138,7 +138,7 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
 
   auto &ratchet = ratchets.at(recipientId);
   const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
-  auto msg = ratchet.encrypt(plaintextBytes);
+  const auto msg = ratchet.encrypt(plaintextBytes);
 
   const auto packedHeader =
       pqxdhResult ? packRatchetHeader(*pqxdhResult, pqxdhSenderIkXPub,
@@ -159,7 +159,7 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
 }
 
 export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
-                                  MessageStore &store,
+                                  const MessageStore &store,
                                   const std::string &accessToken,
                                   const RawKeyPair &myIkX,
                                   const RawKeyPair &mySpk,
@@ -383,7 +383,7 @@ export void fetchAndApplySkdms(
 
 export SendResult
 sendGroupMessage(const ApiClient &api, const GroupSenderKeys &senderKeys,
-                 GroupRatchetMap &groupRatchets, MessageStore &store,
+                 GroupRatchetMap &groupRatchets, const MessageStore &store,
                  const std::string &accessToken, const int32_t groupId,
                  const int32_t myUserId, const std::string &plaintext) {
 
@@ -417,7 +417,7 @@ sendGroupMessage(const ApiClient &api, const GroupSenderKeys &senderKeys,
 
 export void
 receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRatchets,
-                     MessageStore &store, const std::string &accessToken,
+                     const MessageStore &store, const std::string &accessToken,
                      const int32_t groupId, const int32_t myUserId) {
   auto msgs = api.listGroupMessages(accessToken, groupId);
   if (!msgs.is_array())

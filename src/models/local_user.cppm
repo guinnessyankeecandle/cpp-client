@@ -7,6 +7,8 @@ module;
 export module securemsg.models.local_user;
 import securemsg.models.user;
 import securemsg.crypto.keystore;
+import securemsg.crypto.kdf;
+import securemsg.crypto.aead;
 import securemsg.crypto.x25519;
 import securemsg.crypto.ed25519;
 
@@ -36,6 +38,10 @@ public:
   void setRefreshToken(std::string token) { m_refreshToken = std::move(token); }
 
   [[nodiscard]] const KeyBundle &getKeyBundle() const { return *m_keyBundle; }
+
+  [[nodiscard]] std::vector<uint8_t> getDbKey() const {
+    return hkdf(m_keyBundle->ikX.priv, {}, "message-db-key", KEY_BYTES);
+  }
 
   // Removes the OPK with the given public key
   void consumeOneTimePrekey(const std::vector<uint8_t> &opkPub,

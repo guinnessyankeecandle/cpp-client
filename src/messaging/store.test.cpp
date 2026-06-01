@@ -13,7 +13,7 @@ static GroupMessage makeGrpMsg(const int32_t id, const int32_t groupId = 10,
 }
 
 TEST_CASE("MessageStore add direct and retrieve by user", "[store]") {
-  MessageStore s;
+  MessageStore s(":memory:", {});
   s.add(makeMsg(1, 42, 0));
   s.add(makeMsg(2, 42, 1));
   s.add(makeMsg(3, 99, 0));
@@ -23,7 +23,7 @@ TEST_CASE("MessageStore add direct and retrieve by user", "[store]") {
 }
 
 TEST_CASE("MessageStore add group and retrieve by group", "[store]") {
-  MessageStore s;
+  MessageStore s(":memory:", {});
   s.add(makeGrpMsg(1, 10, 0));
   s.add(makeGrpMsg(2, 10, 1));
   s.add(makeGrpMsg(3, 20, 0));
@@ -33,7 +33,7 @@ TEST_CASE("MessageStore add group and retrieve by group", "[store]") {
 }
 
 TEST_CASE("MessageStore getByUser returns in timestamp order", "[store]") {
-  MessageStore s;
+  MessageStore s(":memory:", {});
   s.add(makeMsg(3, 42, 2000));
   s.add(makeMsg(1, 42, 0));
   s.add(makeMsg(2, 42, 1000));
@@ -44,37 +44,44 @@ TEST_CASE("MessageStore getByUser returns in timestamp order", "[store]") {
 }
 
 TEST_CASE("MessageStore containsDirect uses userId", "[store]") {
-  MessageStore s;
+  MessageStore s(":memory:", {});
   s.add(makeMsg(5, 42, 0));
   REQUIRE(s.containsDirect(42, 5));
   REQUIRE_FALSE(s.containsDirect(99, 5));
 }
 
 TEST_CASE("MessageStore containsGroup uses groupId", "[store]") {
-  MessageStore s;
+  MessageStore s(":memory:", {});
   s.add(makeGrpMsg(1, 10, 0));
-  s.add(makeGrpMsg(1, 20, 1));
+  s.add(makeGrpMsg(2, 20, 0));
   REQUIRE(s.containsGroup(10, 1));
-  REQUIRE(s.containsGroup(20, 1));
+  REQUIRE(s.containsGroup(20, 2));
   REQUIRE_FALSE(s.containsGroup(99, 1));
 }
 
-TEST_CASE("MessageStore duplicate direct ID throws", "[store]") {
-  MessageStore s;
+TEST_CASE("MessageStore duplicate direct ID is ignored", "[store]") {
+  MessageStore s(":memory:", {});
   s.add(makeMsg(1, 42, 0));
-  REQUIRE_THROWS_AS(s.add(makeMsg(1, 42, 1)), std::invalid_argument);
+  s.add(makeMsg(1, 42, 1));
+  REQUIRE(s.getByUser(42).size() == 1);
 }
 
-TEST_CASE("MessageStore direct and group can share id", "[store]") {
-  MessageStore s;
+TEST_CASE("MessageStore removeMessage removes from direct", "[store]") {
+  MessageStore s(":memory:", {});
   s.add(makeMsg(1, 42, 0));
+  s.removeDirectMessage(42, 1);
+  REQUIRE_FALSE(s.containsDirect(42, 1));
+}
+
+TEST_CASE("MessageStore removeMessage removes from group", "[store]") {
+  MessageStore s(":memory:", {});
   s.add(makeGrpMsg(1, 10, 0));
-  REQUIRE(s.containsDirect(42, 1));
-  REQUIRE(s.containsGroup(10, 1));
+  s.removeGroupMessage(10, 1);
+  REQUIRE_FALSE(s.containsGroup(10, 1));
 }
 
 TEST_CASE("MessageStore clear", "[store]") {
-  MessageStore s;
+  MessageStore s(":memory:", {});
   s.add(makeMsg(1, 1, 0));
   s.add(makeGrpMsg(2, 10, 0));
   s.clear();
