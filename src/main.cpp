@@ -1,13 +1,13 @@
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
-#include <fstream>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <memory>
+#include <mutex>
 #include <openssl/crypto.h>
 #include <ranges>
 #include <sstream>
@@ -55,11 +55,8 @@ struct AppState {
   MessageStore messageStore;
   std::string composeText;
 
-  // Selected message for actions (server-assigned ID)
   int32_t selectedMsgId{-1};
-  std::string selectedMsgIdStr; // text input for selecting a message by ID
-  std::string statusMsg;        // feedback for message actions
-  std::string forwardToId;      // recipient ID for forwarding
+  std::string statusMsg;
 
   // Group epoch tracking for membership change warnings
   std::unordered_map<int32_t, int32_t> knownGroupEpochs;
@@ -69,8 +66,7 @@ struct AppState {
   std::string overlayKeyB64;
   bool overlayVerified{false};
 
-  std::atomic<bool> pollActive{false};
-  std::thread pollThread;
+  std::unique_ptr<struct Poller> poller;
 };
 
 struct PipeDeleter {
@@ -101,10 +97,6 @@ static Element qrElement(const std::string &uri) {
   return vbox(std::move(rows));
 }
 
-// Forward declarations
-static void startPolling(AppState &state, ScreenInteractive &scr,
-                         const ApiClient &api);
-static void stopPolling(AppState &state);
 static void openIdentityOverlay(AppState &state);
 
 // Publishes the local user's full key bundle to the server.
@@ -155,8 +147,8 @@ Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
 Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
                              const ApiClient &api) {
   auto rUser = Input(&state.regUsername, "username");
-  auto rPass =
-      Input(&state.regPassword, "password", InputOption{.password = true});
+  auto rPass = Input(&state.regPassword, "password",
+                     InputOption{.transform = {}, .password = true});
   auto tCode = Input(&state.regTotpCode, "6-digit code");
 
   auto btnSubmit = Button(" Register ", [&] {
@@ -274,8 +266,8 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
 Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
                           const ApiClient &api) {
   auto lUser = Input(&state.loginUsername, "username");
-  auto lPass =
-      Input(&state.loginPassword, "password", InputOption{.password = true});
+  auto lPass = Input(&state.loginPassword, "password",
+                     InputOption{.transform = {}, .password = true});
   auto tCode = Input(&state.loginTotpCode, "6-digit code");
 
   auto btnLogin = Button(" Login ", [&] {
@@ -388,99 +380,119 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
       });
 }
 
-static void startPolling(AppState &state, ScreenInteractive &scr,
-                         const ApiClient &api) {
-  state.pollActive = true;
-  state.pollThread = std::thread([&] {
-    int contactTick = 0;
-    int spkRotateTick = 0;
-    static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
-    while (state.pollActive) {
-      std::this_thread::sleep_for(std::chrono::seconds(5));
-      if (!state.pollActive)
-        break;
-      try {
-        if (!state.localUser)
-          continue;
-        const auto &lu = *state.localUser;
-        if (state.selectedContactId >= 0 && !state.viewingGroup) {
-          receiveDirectMessages(api, state.ratchets, state.messageStore,
-                                lu.getAccessToken(), lu.getKeyBundle().ikX,
-                                lu.getKeyBundle().spk, lu.getKeyBundle().opks,
-                                lu.getKeyBundle().pq, *state.localUser,
-                                state.loginPassword);
-        } else if (state.viewingGroup && state.selectedGroupId >= 0) {
-          receiveGroupMessages(api, state.groupRatchets, state.messageStore,
-                               lu.getAccessToken(), state.selectedGroupId,
-                               lu.getId());
-        }
-        if (++contactTick >= 6) {
-          contactTick = 0;
-          auto groupsJson = api.listGroups(lu.getAccessToken());
-          if (groupsJson.contains("groups")) {
-            state.groups.clear();
-            for (const auto &g : groupsJson["groups"]) {
-              std::vector<int32_t> members;
-              if (g.contains("members")) {
-                const auto &arr = g["members"];
-                std::ranges::transform(
-                    arr, std::back_inserter(members),
-                    [](const auto &m) { return m.template get<int32_t>(); });
-              }
-              const int32_t gid = g.value("id", 0);
-              const int32_t epoch = g.value("epoch", 0);
-              // Epoch change means membership changed — re-key the group
-              if (state.knownGroupEpochs.contains(gid) &&
-                  state.knownGroupEpochs.at(gid) != epoch) {
-                state.statusMsg =
-                    "⚠ Group " + g.value("name", std::to_string(gid)) +
-                    " membership changed — verify members out-of-band";
-                // Cleanse and drop old sender key so postGroupSenderKey re-keys
-                if (state.groupSenderKeys.contains(gid)) {
-                  auto &sk = state.groupSenderKeys.at(gid);
-                  OPENSSL_cleanse(sk.data(), sk.size());
-                  state.groupSenderKeys.erase(gid);
+struct Poller {
+  Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api) {
+    m_thread = std::thread([&] {
+      static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
+      int contactTick = 5;
+      int spkRotateTick = SPK_ROTATE_INTERVAL;
+
+      std::unique_lock<std::mutex> lock(m_mutex);
+      while (!m_cv.wait_for(lock, std::chrono::seconds(5),
+                            [&] { return m_stop; })) {
+        try {
+          if (!state.localUser)
+            throw std::runtime_error(
+                "poll thread: localUser unexpectedly absent");
+
+          const auto &lu = *state.localUser;
+          if (state.selectedContactId >= 0 && !state.viewingGroup) {
+            receiveDirectMessages(api, state.ratchets, state.messageStore,
+                                  lu.getAccessToken(), lu.getKeyBundle().ikX,
+                                  lu.getKeyBundle().spk, lu.getKeyBundle().opks,
+                                  lu.getKeyBundle().pq, *state.localUser,
+                                  state.loginPassword);
+          } else if (state.viewingGroup && state.selectedGroupId >= 0) {
+            receiveGroupMessages(api, state.groupRatchets, state.messageStore,
+                                 lu.getAccessToken(), state.selectedGroupId,
+                                 lu.getId());
+          }
+
+          if (--contactTick == 0) {
+            contactTick = 6;
+            auto groupsJson = api.listGroups(lu.getAccessToken());
+
+            if (groupsJson.contains("groups")) {
+              std::vector<Group> freshGroups;
+
+              for (const auto &g : groupsJson["groups"]) {
+                std::vector<int32_t> members;
+
+                if (g.contains("members")) {
+                  const auto &arr = g["members"];
+                  std::ranges::transform(
+                      arr, std::back_inserter(members),
+                      [](const auto &m) { return m.template get<int32_t>(); });
                 }
-                // Drop old group ratchets — they used the old sender key
-                state.groupRatchets.erase(gid);
-              }
-              state.knownGroupEpochs[gid] = epoch;
-              state.groups.emplace_back(gid, g.value("name", ""),
-                                        std::move(members), epoch);
 
-              // Post our sender key if we don't have one for this group yet
-              if (!state.groupSenderKeys.contains(gid)) {
+                const int32_t gid = g.at("id").get<int32_t>();
+                const int32_t epoch = g.at("epoch").get<int32_t>();
+
+                // Epoch change means membership changed — re-key the group
+                if (state.knownGroupEpochs.contains(gid) &&
+                    state.knownGroupEpochs.at(gid) != epoch) {
+                  state.statusMsg =
+                      "⚠ Group " + g.at("name").get<std::string>() +
+                      " membership changed — verify members out-of-band";
+
+                  // Cleanse and drop old sender key so postGroupSenderKey
+                  // re-keys
+                  if (state.groupSenderKeys.contains(gid)) {
+                    auto &sk = state.groupSenderKeys.at(gid);
+                    OPENSSL_cleanse(sk.data(), sk.size());
+                    state.groupSenderKeys.erase(gid);
+                  }
+                  // Drop old group ratchets — they used the old sender key
+                  state.groupRatchets.erase(gid);
+                }
+                state.knownGroupEpochs[gid] = epoch;
+                freshGroups.emplace_back(gid, g.at("name").get<std::string>(),
+                                         std::move(members), epoch);
+
+                // Fetch sender keys from other members first
                 const auto &kb = lu.getKeyBundle();
-                postGroupSenderKey(api, lu.getAccessToken(), gid,
-                                   state.groups.back().getMembers(), kb.ikX,
-                                   state.groupSenderKeys, state.skdmTracker);
-              }
+                fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ikX,
+                                   kb.spk, kb.opks, kb.pq, state.groupRatchets,
+                                   state.skdmTracker);
 
-              // Fetch sender keys from other members
-              const auto &kb = lu.getKeyBundle();
-              fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ikX, kb.spk,
-                                 kb.opks, kb.pq, state.groupRatchets,
-                                 state.skdmTracker);
+                // Only post our sender key if we still don't have one
+                if (!state.groupSenderKeys.contains(gid)) {
+                  postGroupSenderKey(api, lu.getAccessToken(), gid,
+                                     freshGroups.back().getMembers(), kb.ikX,
+                                     state.groupSenderKeys, state.skdmTracker);
+                }
+              }
+              state.groups = std::move(freshGroups);
             }
           }
+          if (--spkRotateTick == 0 && state.localUser) {
+            spkRotateTick = SPK_ROTATE_INTERVAL;
+            state.localUser->rotateSPK(state.loginPassword);
+            publishBundle(api, *state.localUser);
+          }
+          scr.PostEvent(Event::Custom);
+        } catch (...) {
         }
-        if (++spkRotateTick >= SPK_ROTATE_INTERVAL && state.localUser) {
-          spkRotateTick = 0;
-          state.localUser->rotateSPK(state.loginPassword);
-          publishBundle(api, *state.localUser);
-        }
-        scr.PostEvent(Event::Custom);
-      } catch (...) {
       }
-    }
-  });
-}
+    });
+  }
 
-static void stopPolling(AppState &state) {
-  state.pollActive = false;
-  if (state.pollThread.joinable())
-    state.pollThread.join();
-}
+  ~Poller() {
+    {
+      std::lock_guard lock(m_mutex);
+      m_stop = true;
+    }
+    m_cv.notify_one();
+    if (m_thread.joinable())
+      m_thread.join();
+  }
+
+private:
+  std::thread m_thread;
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  bool m_stop{false};
+};
 
 static void openIdentityOverlay(AppState &state) {
   const int32_t targetId = state.viewingGroup ? -1 : state.selectedContactId;
@@ -498,28 +510,10 @@ static void openIdentityOverlay(AppState &state) {
 
 Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                          const ApiClient &api) {
-  static bool pollingStarted = false;
-  if (!pollingStarted) {
-    pollingStarted = true;
-    startPolling(state, scr, api);
-  }
+  if (!state.poller)
+    state.poller = std::make_unique<Poller>(state, scr, api);
 
   auto composeInput = Input(&state.composeText, "Type a message...");
-  auto forwardInput = Input(&state.forwardToId, "Recipient ID");
-  auto msgIdInput = Input(&state.selectedMsgIdStr, "Msg ID");
-  msgIdInput |= CatchEvent([&](const Event &e) {
-    if (e == Event::Return && !state.selectedMsgIdStr.empty()) {
-      try {
-        state.selectedMsgId = std::stoi(state.selectedMsgIdStr);
-        state.statusMsg = "Selected message " + state.selectedMsgIdStr;
-      } catch (...) {
-        state.statusMsg = "Invalid message ID.";
-      }
-      return true;
-    }
-    return false;
-  });
-
   auto btnSend = Button(" Send ", [&] {
     if (state.composeText.empty())
       return;
@@ -545,107 +539,59 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     }
   });
 
-  // Forward selected message to another user
-  auto btnForward = Button(" Forward ", [&] {
-    if (!state.localUser || state.selectedMsgId < 0 ||
-        state.forwardToId.empty()) {
-      state.statusMsg = "Select a message and enter recipient ID to forward.";
-      return;
-    }
-    try {
-      const int32_t recipientId = std::stoi(state.forwardToId);
-      // Find the message plaintext in the store
-      const auto msgs = state.messageStore.getByUser(state.selectedContactId);
-      const auto it = std::ranges::find_if(msgs, [&](const auto &m) {
-        return m.getId() == state.selectedMsgId;
-      });
-      if (it == msgs.end()) {
-        state.statusMsg = "Message not found locally.";
-        return;
-      }
-      sendDirectMessage(api, state.ratchets, state.messageStore,
-                        state.localUser->getAccessToken(), recipientId,
-                        it->getPlaintext(), state.localUser->getKeyBundle().ikX,
-                        state.contactCache);
-      state.statusMsg = "Forwarded.";
-      state.forwardToId.clear();
-      scr.PostEvent(Event::Custom);
-    } catch (const std::exception &e) {
-      state.statusMsg = "Forward error: " + std::string(e.what());
-    }
-  });
+  const auto msgLabels = std::make_shared<std::vector<std::string>>();
+  const auto msgIds = std::make_shared<std::vector<int32_t>>();
+  const auto msgSent = std::make_shared<std::vector<bool>>();
+  int msgSelected = 0;
 
-  // Revoke selected message on server
-  auto btnRevoke = Button(" Revoke ", [&] {
-    if (!state.localUser || state.selectedMsgId < 0) {
-      state.statusMsg = "Select a message to revoke.";
-      return;
+  [[maybe_unused]] auto rebuildMsgLabels = [&] {
+    msgLabels->clear();
+    msgIds->clear();
+    msgSent->clear();
+    if (state.viewingGroup && state.selectedGroupId >= 0) {
+      for (const auto &m :
+           state.messageStore.getByGroup(state.selectedGroupId)) {
+        msgLabels->push_back(" " + m.getPlaintext());
+        msgIds->push_back(m.getId());
+        msgSent->push_back(false);
+      }
+    } else if (!state.viewingGroup && state.selectedContactId >= 0) {
+      for (const auto &m :
+           state.messageStore.getByUser(state.selectedContactId)) {
+        const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
+        msgLabels->push_back((mine ? " You: " : " Them: ") + m.getPlaintext());
+        msgIds->push_back(m.getId());
+        msgSent->push_back(mine);
+      }
     }
+    if (msgSelected >= static_cast<int>(msgIds->size()))
+      msgSelected = std::max(0, static_cast<int>(msgIds->size()) - 1);
+    state.selectedMsgId = msgIds->empty() ? -1 : msgIds->at(msgSelected);
+  };
+
+  MenuOption msgMenuOpt;
+  msgMenuOpt.on_change = [&] {
+    if (!msgIds->empty() && msgSelected < static_cast<int>(msgIds->size()))
+      state.selectedMsgId = msgIds->at(msgSelected);
+  };
+  auto msgMenu = Menu(msgLabels.get(), &msgSelected, msgMenuOpt);
+
+  auto btnDelete = Button(" \U0001f5d1 ", [&] {
+    if (!state.localUser || state.selectedMsgId < 0)
+      return;
     try {
-      api.revokeMessage(state.localUser->getAccessToken(), state.selectedMsgId);
-      state.statusMsg = "Message revoked on server.";
+      const bool sent = !msgSent->empty() &&
+                        msgSelected < static_cast<int>(msgSent->size()) &&
+                        msgSent->at(msgSelected);
+      if (sent)
+        api.revokeMessage(state.localUser->getAccessToken(),
+                          state.selectedMsgId);
+      else
+        api.acknowledgeReceipt(state.localUser->getAccessToken(),
+                               state.selectedMsgId);
+      state.messageStore.clear();
       state.selectedMsgId = -1;
-      scr.PostEvent(Event::Custom);
-    } catch (const std::exception &e) {
-      state.statusMsg = "Revoke error: " + std::string(e.what());
-    }
-  });
-
-  // Download selected message to file
-  auto btnDownload = Button(" Download ", [&] {
-    if (state.selectedMsgId < 0) {
-      state.statusMsg = "Select a message to download.";
-      return;
-    }
-    try {
-      // Find plaintext from store
-      std::string plaintext;
-      if (!state.viewingGroup) {
-        const auto direct =
-            state.messageStore.getByUser(state.selectedContactId);
-        const auto it = std::ranges::find_if(direct, [&](const auto &m) {
-          return m.getId() == state.selectedMsgId;
-        });
-        if (it != direct.end())
-          plaintext = it->getPlaintext();
-      } else {
-        const auto grp = state.messageStore.getByGroup(state.selectedGroupId);
-        const auto it = std::ranges::find_if(grp, [&](const auto &m) {
-          return m.getId() == state.selectedMsgId;
-        });
-        if (it != grp.end())
-          plaintext = it->getPlaintext();
-      }
-      if (plaintext.empty()) {
-        state.statusMsg = "Message not found or empty.";
-        return;
-      }
-      const std::string filename =
-          "message_" + std::to_string(state.selectedMsgId) + ".txt";
-      std::ofstream f(filename);
-      if (!f) {
-        state.statusMsg = "Could not write file.";
-        return;
-      }
-      f << plaintext;
-      state.statusMsg = "Saved to " + filename;
-    } catch (const std::exception &e) {
-      state.statusMsg = "Download error: " + std::string(e.what());
-    }
-  });
-
-  // Delete message locally (acknowledge receipt removes from server too)
-  auto btnDelete = Button(" Delete ", [&] {
-    if (!state.localUser || state.selectedMsgId < 0) {
-      state.statusMsg = "Select a message to delete.";
-      return;
-    }
-    try {
-      api.acknowledgeReceipt(state.localUser->getAccessToken(),
-                             state.selectedMsgId);
-      state.messageStore.clear(); // refresh from server on next poll
-      state.statusMsg = "Message deleted.";
-      state.selectedMsgId = -1;
+      state.statusMsg = sent ? "Message revoked." : "Message deleted.";
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
       state.statusMsg = "Delete error: " + std::string(e.what());
@@ -705,51 +651,19 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   });
 
   const auto rightPanel = Renderer(
-      Container::Vertical({composeInput, btnSend, msgIdInput, forwardInput,
-                           btnForward, btnRevoke, btnDownload, btnDelete}),
-      [&, composeInput, btnSend, msgIdInput, forwardInput, btnForward,
-       btnRevoke, btnDownload, btnDelete] {
-        Elements msgs;
-        if (state.viewingGroup && state.selectedGroupId >= 0) {
-          for (const auto &m :
-               state.messageStore.getByGroup(state.selectedGroupId)) {
-            const bool sel = m.getId() == state.selectedMsgId;
-            auto line = text(" [" + std::to_string(m.getId()) +
-                             "] Them: " + m.getPlaintext()) |
-                        (sel ? inverted : nothing);
-            msgs.push_back(line);
-          }
-        } else if (!state.viewingGroup && state.selectedContactId >= 0) {
-          for (const auto &m :
-               state.messageStore.getByUser(state.selectedContactId)) {
-            const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
-            const bool sel = m.getId() == state.selectedMsgId;
-            auto line =
-                text((mine ? " You" : " Them") + std::string(" [") +
-                     std::to_string(m.getId()) + "]: " + m.getPlaintext()) |
-                (sel ? inverted : nothing);
-            if (mine)
-              line = line | align_right;
-            msgs.push_back(line);
-          }
-        }
-        if (msgs.empty())
-          msgs.push_back(text(" No messages yet ") | dim | center);
+      Container::Vertical({msgMenu, composeInput, btnSend, btnDelete}),
+      [&, msgMenu, composeInput, btnSend, btnDelete] {
+        rebuildMsgLabels();
+        const Element msgList = msgLabels->empty()
+                              ? (text(" No messages yet ") | dim | center)
+                              : (msgMenu->Render() | flex | frame);
+        Elements rows{msgList, separator(),
+                      hbox({composeInput->Render() | flex, btnSend->Render()})};
+        if (state.selectedMsgId >= 0)
+          rows.push_back(hbox({filler(), btnDelete->Render()}));
         if (!state.statusMsg.empty())
-          msgs.push_back(text(" " + state.statusMsg) | dim);
-        return vbox({
-                   vbox(std::move(msgs)) | flex | frame,
-                   separator(),
-                   hbox({composeInput->Render() | flex, btnSend->Render()}),
-                   separator(),
-                   hbox({text(" Select: "),
-                         msgIdInput->Render() | size(WIDTH, EQUAL, 6),
-                         text("  Fwd→: "), forwardInput->Render() | flex,
-                         btnForward->Render()}),
-                   hbox({btnRevoke->Render(), btnDownload->Render(),
-                         btnDelete->Render()}),
-               }) |
-               border;
+          rows.push_back(text(" " + state.statusMsg) | dim);
+        return vbox(std::move(rows)) | border;
       });
 
   int splitPos = 30;
@@ -824,7 +738,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           return true;
         }
         if (e == Event::Character('q')) {
-          stopPolling(state);
+          state.poller.reset();
           scr.ExitLoopClosure()();
           return true;
         }
