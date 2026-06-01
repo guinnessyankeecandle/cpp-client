@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <ranges>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -68,12 +69,12 @@ struct AppState {
   std::thread pollThread;
 };
 
-static Element qrElement(const std::string &uri) {
-  struct PipeDeleter {
-    void operator()(FILE *f) const { pclose(f); }
-  };
-  using PipePtr = std::unique_ptr<FILE, PipeDeleter>;
+struct PipeDeleter {
+  void operator()(FILE *f) const { pclose(f); }
+};
+using PipePtr = std::unique_ptr<FILE, PipeDeleter>;
 
+static Element qrElement(const std::string &uri) {
   const auto pipe =
       PipePtr(popen(("qrencode -t UTF8 -o - -- '" + uri + "'").c_str(), "r"));
   if (!pipe)
@@ -82,7 +83,7 @@ static Element qrElement(const std::string &uri) {
 
   std::string out;
   std::array<char, 256> buf{};
-  while (fgets(buf.data(), static_cast<int>(buf.size()), pipe.get()))
+  while (fgets(buf.data(), buf.size(), pipe.get()))
     out += buf.data();
 
   if (out.empty())
@@ -98,7 +99,7 @@ static Element qrElement(const std::string &uri) {
 
 // Forward declarations
 static void startPolling(AppState &state, ScreenInteractive &scr,
-                         ApiClient &api);
+                         const ApiClient &api);
 static void stopPolling(AppState &state);
 static void openIdentityOverlay(AppState &state);
 
@@ -106,8 +107,9 @@ static void openIdentityOverlay(AppState &state);
 static void publishBundle(const ApiClient &api, const LocalUser &user) {
   const auto &kb = user.getKeyBundle();
   std::vector<std::string> opkPubs;
-  std::ranges::transform(kb.opks, std::back_inserter(opkPubs),
-                         [](const RawKeyPair &k) { return base64Encode(k.pub); });
+  opkPubs.reserve(kb.opks.size());
+  for (const auto &k : kb.opks)
+    opkPubs.push_back(base64Encode(k.pub));
   api.publishKeyBundle(user.getAccessToken(), base64Encode(kb.ik.pub),
                        base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
                        base64Encode(kb.spk.pub), base64Encode(kb.spkSig),
@@ -147,7 +149,7 @@ Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
 }
 
 Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
-                             ApiClient &api) {
+                             const ApiClient &api) {
   auto rUser = Input(&state.regUsername, "username");
   auto rPass = Input(&state.regPassword, "password",
                      InputOption{.transform = {}, .password = true});
@@ -164,9 +166,21 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
       const auto verifier = SrpSession::computeVerifier(
           state.regUsername, state.regPassword, saltHex);
       auto res = api.registerUser(state.regUsername, saltHex, verifier);
-      state.regStatus = "Registered! Scan the QR code with your authenticator.";
       if (res.contains("totp_provisioning_uri"))
         state.regTotpUri = res["totp_provisioning_uri"].get<std::string>();
+
+      SrpSession srp;
+      auto init = api.srpInit(state.regUsername);
+      const auto [clientPublic, clientProof] =
+          srp.computeProof(state.regUsername, state.regPassword,
+                           init["srp_salt"], init["server_public"]);
+      auto verify = api.srpVerify(init["session_id"], clientPublic, clientProof);
+      if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
+        state.regStatus = "Server proof invalid.";
+        return;
+      }
+      state.loginPreAuthToken = verify["pre_auth_token"].get<std::string>();
+      state.regStatus = "Registered! Scan the QR code with your authenticator.";
       state.regShowTotp = true;
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
@@ -180,23 +194,14 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
       return;
     }
     try {
-      SrpSession srp;
-      auto init = api.srpInit(state.regUsername);
-      const auto [A, M1] =
-          srp.computeProof(state.regUsername, state.regPassword,
-                           init["srp_salt"], init["server_public"]);
-      auto verify = api.srpVerify(init["session_id"], A, M1);
-      if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
-        state.regTotpStatus = "Server proof invalid.";
-        return;
-      }
-      auto tokens = api.verify2FA(verify["pre_auth_token"].get<std::string>(),
-                                  state.regTotpCode);
-      state.localUser.emplace(tokens.value("user_id", 0), state.regUsername,
+      auto tokens = api.verify2FA(state.loginPreAuthToken, state.regTotpCode);
+      state.localUser.emplace(tokens.at("user_id").get<int32_t>(), state.regUsername,
                               tokens["access_token"].get<std::string>(),
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.regPassword);
       publishBundle(api, *state.localUser);
+      state.regShowTotp = false;
+      state.regTotpUri.clear();
       state.screen = AppScreen::Main;
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
@@ -219,9 +224,9 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
         Elements body = {
             text(" Register ") | bold | center,
             separator(),
-            hbox({text(" Username : "), rUser->Render() | flex}),
+            hbox({text(" Username : "), rUser->Render() | flex | size(HEIGHT, EQUAL, 1)}),
             separator(),
-            hbox({text(" Password : "), rPass->Render() | flex}),
+            hbox({text(" Password : "), rPass->Render() | flex | size(HEIGHT, EQUAL, 1)}),
         };
         if (!state.regShowTotp) {
           body.push_back(separator());
@@ -230,7 +235,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
         }
         if (!state.regStatus.empty())
           body.push_back(paragraph(" " + state.regStatus) |
-                         color(state.regStatus.rfind("Error", 0) == 0
+                         color(state.regStatus.starts_with("Error")
                                    ? Color::Red
                                    : Color::Green));
         if (state.regShowTotp) {
@@ -238,7 +243,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
           if (!state.regTotpUri.empty())
             body.push_back(qrElement(state.regTotpUri) | center);
           body.push_back(separator());
-          body.push_back(hbox({text(" TOTP Code : "), tCode->Render() | flex}));
+          body.push_back(hbox({text(" TOTP Code : "), tCode->Render() | flex | size(HEIGHT, EQUAL, 1)}));
           body.push_back(separator());
           body.push_back(hbox({filler(), btnVerifyTotp->Render(), text("  "),
                                btnBack->Render(), filler()}));
@@ -255,7 +260,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
 }
 
 Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
-                          ApiClient &api) {
+                          const ApiClient &api) {
   auto lUser = Input(&state.loginUsername, "username");
   auto lPass = Input(&state.loginPassword, "password",
                      InputOption{.transform = {}, .password = true});
@@ -270,10 +275,10 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
       state.loginStatus = "Authenticating...";
       SrpSession srp;
       auto init = api.srpInit(state.loginUsername);
-      const auto [A, M1] =
+      const auto [clientPublic, clientProof] =
           srp.computeProof(state.loginUsername, state.loginPassword,
                            init["srp_salt"], init["server_public"]);
-      auto verify = api.srpVerify(init["session_id"], A, M1);
+      auto verify = api.srpVerify(init["session_id"], clientPublic, clientProof);
       if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
         state.loginStatus = "ERROR: Server proof invalid -- possible MITM!";
         return;
@@ -295,7 +300,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
     try {
       auto tokens = api.verify2FA(state.loginPreAuthToken, state.loginTotpCode);
       const bool isNewDevice = !std::filesystem::exists("identity.key");
-      state.localUser.emplace(tokens.value("user_id", 0), state.loginUsername,
+      state.localUser.emplace(tokens.at("user_id").get<int32_t>(), state.loginUsername,
                               tokens["access_token"].get<std::string>(),
                               tokens["refresh_token"].get<std::string>(),
                               "identity.key", state.loginPassword);
@@ -334,9 +339,9 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
         Elements body = {
             text(" Login ") | bold | center,
             separator(),
-            hbox({text(" Username : "), lUser->Render() | flex}),
+            hbox({text(" Username : "), lUser->Render() | flex | size(HEIGHT, EQUAL, 1)}),
             separator(),
-            hbox({text(" Password : "), lPass->Render() | flex}),
+            hbox({text(" Password : "), lPass->Render() | flex | size(HEIGHT, EQUAL, 1)}),
         };
         if (!state.loginShowTotp) {
           body.push_back(separator());
@@ -346,7 +351,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
             body.push_back(text(" " + state.loginStatus) | color(Color::Red));
         } else {
           body.push_back(separator());
-          body.push_back(hbox({text(" TOTP Code : "), tCode->Render() | flex}));
+          body.push_back(hbox({text(" TOTP Code : "), tCode->Render() | flex | size(HEIGHT, EQUAL, 1)}));
           body.push_back(separator());
           body.push_back(hbox({filler(), btnVerify->Render(), text("  "),
                                btnBack->Render(), filler()}));
@@ -364,7 +369,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
 }
 
 static void startPolling(AppState &state, ScreenInteractive &scr,
-                         ApiClient &api) {
+                         const ApiClient &api) {
   state.pollActive = true;
   state.pollThread = std::thread([&] {
     int contactTick = 0;
@@ -472,7 +477,7 @@ static void openIdentityOverlay(AppState &state) {
 }
 
 Component makeMainScreen(AppState &state, ScreenInteractive &scr,
-                         ApiClient &api) {
+                         const ApiClient &api) {
   static bool pollingStarted = false;
   if (!pollingStarted) {
     pollingStarted = true;
@@ -573,8 +578,6 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       return;
     }
     try {
-      const auto msgs = state.viewingGroup ? std::vector<BaseMessage *>{}
-                                           : std::vector<BaseMessage *>{};
       // Find plaintext from store
       std::string plaintext;
       if (!state.viewingGroup) {
@@ -705,7 +708,9 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                 text((mine ? " You" : " Them") + std::string(" [") +
                      std::to_string(m.getId()) + "]: " + m.getPlaintext()) |
                 (sel ? inverted : nothing);
-            msgs.push_back(mine ? line | align_right : line);
+            if (mine)
+              line = line | align_right;
+            msgs.push_back(line);
           }
         }
         if (msgs.empty())
@@ -809,7 +814,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
 int main() {
   auto scr = ScreenInteractive::Fullscreen();
-  ApiClient api("https://BobbyTables.theburkenator.com");
+  const ApiClient api("https://BobbyTables.theburkenator.com");
   AppState state;
 
   int screenIdx = 0;

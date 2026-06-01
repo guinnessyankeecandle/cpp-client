@@ -166,7 +166,7 @@ public:
     }
     (void)m_http.del("/groups/" + std::to_string(groupId) + "/members/" +
                          std::to_string(userId),
-                     body.empty() ? nullptr : body, accessToken);
+                     body, accessToken);
   }
 
   [[nodiscard]] nlohmann::json
