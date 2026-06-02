@@ -37,6 +37,19 @@ else
     exit 1
 fi
 
+# Build OpenSSL 3.5 if not already installed (required for ML-KEM-1024)
+if [ ! -f /usr/local/openssl-3.5/lib64/libssl.so ]; then
+    echo "Building OpenSSL 3.5 (required for ML-KEM-1024)..."
+    cd /tmp
+    wget -q https://github.com/openssl/openssl/releases/download/openssl-3.5.0/openssl-3.5.0.tar.gz
+    tar xf openssl-3.5.0.tar.gz
+    cd openssl-3.5.0
+    ./Configure --prefix=/usr/local/openssl-3.5 --openssldir=/usr/local/openssl-3.5 shared
+    make -j"$(nproc)"
+    sudo make install
+    cd "$SCRIPT_DIR"
+fi
+
 # Install Python dependencies and Conan
 pip3 install --quiet srp conan --break-system-packages
 if [ ! -f cmake-build-debug/sqlite_ormConfig.cmake ] && [ ! -f cmake-build-debug/sqlite_orm-config.cmake ]; then
