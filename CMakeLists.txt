@@ -148,6 +148,9 @@ target_sources(securemsg_messaging PUBLIC
         src/messaging/send_receive.cppm
         src/messaging/messaging.cppm)
 target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm)
+# Explicitly propagate sqlite_orm include dirs so clang-scan-deps finds the header during module scanning
+target_include_directories(securemsg_messaging PUBLIC
+    $<TARGET_PROPERTY:sqlite_orm::sqlite_orm,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
 # ── Main logic (pure, testable) ───────────────────────────────────────────────
