@@ -489,7 +489,6 @@ struct Poller {
   Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api)
       : m_thread([&] {
           static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
-          int contactTick = 5;
           int spkRotateTick = SPK_ROTATE_INTERVAL;
 
           std::unique_lock<std::mutex> lock(m_mutex);
@@ -543,8 +542,8 @@ struct Poller {
 
               state.msgsDirty = true;
 
-              if (--contactTick == 0) {
-                contactTick = 6;
+              // Poll groups every tick (same cadence as direct messages)
+              {
                 auto groupsJson = api.listGroups(lu.getAccessToken());
 
                 if (groupsJson.contains("groups")) {
@@ -571,20 +570,37 @@ struct Poller {
                           "⚠ Group " + g.at("name").get<std::string>() +
                           " membership changed — verify members out-of-band";
 
-                      // Cleanse and drop old sender key so postGroupSenderKey
-                      // re-keys
                       if (state.groupSenderKeys.contains(gid)) {
                         auto &sk = state.groupSenderKeys.at(gid);
                         OPENSSL_cleanse(sk.data(), sk.size());
                         state.groupSenderKeys.erase(gid);
                       }
-                      // Drop old group ratchets — they used the old sender key
                       state.groupRatchets.erase(gid);
                     }
                     state.knownGroupEpochs[gid] = epoch;
                     freshGroups.emplace_back(gid,
                                              g.at("name").get<std::string>(),
                                              std::move(members), epoch);
+
+                    // Pre-cache usernames for all members so the renderer
+                    // never needs to make API calls on the UI thread
+                    for (const int32_t mid : freshGroups.back().getMembers()) {
+                      if (mid == lu.getId()) continue;
+                      const bool cached = std::ranges::any_of(state.contacts,
+                          [mid](const auto &c) { return c.getId() == mid; }) ||
+                          std::ranges::any_of(state.contactCache,
+                          [mid](const auto &c) { return c.getId() == mid; });
+                      if (!cached) {
+                        try {
+                          const auto r = api.lookupById(lu.getAccessToken(), mid);
+                          const auto name = r.at("username").get<std::string>();
+                          const auto ikRes = api.lookupByUsername(lu.getAccessToken(), name);
+                          const auto ikPub = base64Decode(ikRes.at("identity_pub").get<std::string>());
+                          std::lock_guard<std::mutex> lk(state.stateMutex);
+                          state.contactCache.emplace_back(mid, name, ikPub);
+                        } catch (...) {}
+                      }
+                    }
 
                     // Only post our sender key if we still don't have one
                     if (!state.groupSenderKeys.contains(gid)) {
@@ -662,6 +678,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   });
 
 
+  // Cache-only lookup — never makes API calls (poller pre-populates the cache)
   auto usernameById = [&](const int32_t id) -> std::string {
     const auto it = std::ranges::find_if(
         state.contacts, [id](const auto &c) { return c.getId() == id; });
@@ -671,16 +688,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         state.contactCache, [id](const auto &c) { return c.getId() == id; });
     if (cit != state.contactCache.end())
       return cit->getUsername();
-    try {
-      const auto res   = api.lookupById(state.localUser->getAccessToken(), id);
-      const auto name  = res.at("username").get<std::string>();
-      const auto ikRes = api.lookupByUsername(state.localUser->getAccessToken(), name);
-      const auto ikPub = base64Decode(ikRes.at("identity_pub").get<std::string>());
-      state.contactCache.emplace_back(id, name, ikPub);
-      return name;
-    } catch (...) {
-      return "user:" + std::to_string(id);
-    }
+    return "user:" + std::to_string(id);
   };
 
   auto rebuildMsgLabels = [msgLabels = state.msgLabels, msgIds = state.msgIds,
