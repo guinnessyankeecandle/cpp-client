@@ -8,7 +8,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
+# Normalise SQLite3 target name — Conan uses SQLite::SQLite3, system CMake uses SQLite3::SQLite3
+if(TARGET SQLite::SQLite3 AND NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+elseif(TARGET SQLite3::SQLite3 AND NOT TARGET SQLite::SQLite3)
+    add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
+endif()
 find_package(SqliteOrm QUIET)
+if(NOT TARGET sqlite_orm::sqlite_orm)
+    include(FetchContent)
+    FetchContent_Declare(sqlite_orm
+        GIT_REPOSITORY https://github.com/fnc12/sqlite_orm.git
+        GIT_TAG        v1.8.2)
+    FetchContent_MakeAvailable(sqlite_orm)
+endif()
 
 find_package(nlohmann_json QUIET PATHS
     /usr/share/cmake/nlohmann_json
