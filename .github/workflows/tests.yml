@@ -16,7 +16,7 @@ jobs:
           pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan sqlite python-pip
           pip install --quiet conan
           conan profile detect --force
-          conan install . --output-folder=build --build=missing -s build_type=Debug -c tools.cmake.cmaketoolchain:generator=Ninja --quiet
+          conan install . --output-folder=build --build=missing -s build_type=Release -c tools.cmake.cmaketoolchain:generator=Ninja 2>&1 | grep -v "^WARN: deprecated"
       - name: Configure
         env:
           CC: clang
@@ -39,7 +39,7 @@ jobs:
           pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan sqlite python-pip
           pip install --quiet conan
           conan profile detect --force
-          conan install . --output-folder=build-coverage --build=missing -s build_type=Debug -c tools.cmake.cmaketoolchain:generator=Ninja --quiet
+          conan install . --output-folder=build-coverage --build=missing -s build_type=Release -c tools.cmake.cmaketoolchain:generator=Ninja 2>&1 | grep -v "^WARN: deprecated"
       - name: Configure
         env:
           CC: clang

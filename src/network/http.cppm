@@ -1,7 +1,9 @@
 module;
 #include <curl/curl.h>
+#include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -62,12 +64,14 @@ public:
 private:
   std::string m_baseUrl;
   CurlPtr m_curl;
+  mutable std::mutex m_curlMutex; // CURL handles are not thread-safe
   std::function<void(int)> m_retryAfterCb = [](int) {};
 
   [[nodiscard]] nlohmann::json request(const std::string &method,
                                        const std::string &path,
                                        const std::string &bodyStr,
                                        const std::string &accessToken) const {
+    std::lock_guard<std::mutex> lock(m_curlMutex);
     const std::string url = m_baseUrl + "/api/v1" + path;
     std::string responseBody;
     long responseCode = 0;
@@ -111,9 +115,13 @@ private:
     }
     if (responseCode == 401)
       throw std::runtime_error("Unauthorised (401)");
-    if (responseCode >= 400)
-      throw std::runtime_error("HTTP " + std::to_string(responseCode) + ": " +
-                               responseBody);
+    if (responseCode >= 400) {
+      const std::string msg =
+          "HTTP " + std::to_string(responseCode) + ": " + responseBody;
+      std::ofstream log("securemsg.log", std::ios::app);
+      log << msg << "\n";
+      throw std::runtime_error(msg);
+    }
 
     if (responseBody.empty())
       return nullptr;

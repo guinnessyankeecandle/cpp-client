@@ -4,8 +4,9 @@ module;
 #include <botan/bigint.h>
 #include <botan/dl_group.h>
 #include <botan/hex.h>
+#include <botan/numthry.h>
+#include <botan/reducer.h>
 #include <botan/srp6.h>
-#include <botan/symkey.h>
 #include <cstdint>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -17,6 +18,16 @@ import securemsg.crypto.random;
 import securemsg.crypto.aead;
 
 using MdCtxPtr = OssPtr<EVP_MD_CTX, EVP_MD_CTX_free>;
+
+static std::string stripHexPrefix(const std::string &s) {
+  return s.substr(0, 2) == "0x" ? s.substr(2) : s;
+}
+
+static std::string toLower(std::string s) {
+  std::ranges::transform(s, s.begin(),
+                         [](const unsigned char c) { return std::tolower(c); });
+  return s;
+}
 
 export struct SrpProof {
   std::string clientPublicHex;
@@ -33,8 +44,8 @@ public:
     const Botan::BigInt verifier = Botan::srp6_generate_verifier(
         username, password, saltBytes, SRP_GROUP, SRP_HASH);
 
-    saltHexOut = Botan::BigInt(saltBytes).to_hex_string();
-    return verifier.to_hex_string();
+    saltHexOut = toLower(Botan::hex_encode(saltBytes));
+    return toLower(stripHexPrefix(verifier.to_hex_string()));
   }
 
   SrpProof computeProof(const std::string &username,
@@ -47,25 +58,56 @@ public:
         Botan::BigInt::from_string("0x" + serverPublicHex);
     const auto saltBytes = Botan::hex_decode(srpSaltHex);
 
-    auto [clientPublic, sessionKey] = Botan::srp6_client_agree(
-        username, password, SRP_GROUP, SRP_HASH, saltBytes, serverPublic, rng);
+    const Botan::DL_Group group = Botan::DL_Group::from_name(SRP_GROUP);
+    const Botan::BigInt &N = group.get_p();
+    const Botan::BigInt &g = group.get_g();
 
-    m_clientPublic = clientPublic;
-    auto keyBits = sessionKey.bits_of();
-    m_sessionKey.assign(keyBits.begin(), keyBits.end());
-    OPENSSL_cleanse(keyBits.data(), keyBits.size());
+    // k = H(N_padded || g_padded) — RFC 5054
+    const auto N_bytes = N.serialize(SRP_FIELD_BYTES);
+    const auto g_bytes_padded_k = g.serialize(SRP_FIELD_BYTES);
+    const auto k_hash = sha256({{N_bytes.data(), N_bytes.size()},
+                                {g_bytes_padded_k.data(), g_bytes_padded_k.size()}});
+    const Botan::BigInt k(k_hash.data(), k_hash.size());
+
+    // Ephemeral a, A = g^a mod N
+    const Botan::BigInt a(rng, 256);
+    m_clientPublic = group.power_g_p(a, N.bits());
+
+    // u = H(pad(A) || pad(B))
+    const auto A_bytes = m_clientPublic.serialize(SRP_FIELD_BYTES);
+    const auto B_bytes = serverPublic.serialize(SRP_FIELD_BYTES);
+    const auto u_hash = sha256({{A_bytes.data(), A_bytes.size()},
+                                {B_bytes.data(), B_bytes.size()}});
+    const Botan::BigInt u(u_hash.data(), u_hash.size());
+
+    // x = H(salt || H(username:password))
+    const std::string cred = username + ":" + password;
+    const auto h_cred = sha256(
+        {{reinterpret_cast<const uint8_t *>(cred.data()), cred.size()}});
+    const auto x_bytes = sha256({{saltBytes.data(), saltBytes.size()},
+                                 {h_cred.data(), h_cred.size()}});
+    const Botan::BigInt x(x_bytes.data(), x_bytes.size());
+
+    // S = (B - k*g^x mod N)^(a + u*x) mod N
+    const Botan::Modular_Reducer mod_N(N);
+    const Botan::BigInt gx   = group.power_g_p(x, N.bits());
+    const Botan::BigInt kgx  = mod_N.reduce(k * gx);
+    const Botan::BigInt base = mod_N.reduce(serverPublic - kgx + N);
+    const Botan::BigInt S    = Botan::power_mod(base, a + u * x, N);
+
+    // K = H(minimal S bytes) — pysrp uses long_to_bytes(S) without padding
+    const auto S_min = S.serialize();
+    m_sessionKey = sha256({{S_min.data(), S_min.size()}});
 
     // Conversions to big endian
-    const Botan::DL_Group group = Botan::DL_Group::from_name(SRP_GROUP);
-    const auto modulusBytes = group.get_p().serialize(SRP_FIELD_BYTES);
-    const auto generatorByte = static_cast<uint8_t>(group.get_g().word_at(0));
+    const auto modulusBytes = N.serialize(SRP_FIELD_BYTES);
     const auto clientPublicBytes = m_clientPublic.serialize(SRP_FIELD_BYTES);
     const auto serverPublicBytes = serverPublic.serialize(SRP_FIELD_BYTES);
 
     const auto hashModulus =
         sha256({{modulusBytes.data(), modulusBytes.size()}});
     const auto hashGenerator =
-        sha256({{&generatorByte, sizeof(generatorByte)}});
+        sha256({{g_bytes_padded_k.data(), g_bytes_padded_k.size()}});
     std::vector<uint8_t> xorNG(KEY_BYTES);
     for (std::size_t i = 0; i < KEY_BYTES; ++i)
       xorNG[i] = hashModulus[i] ^ hashGenerator[i];
@@ -83,7 +125,9 @@ public:
         {m_sessionKey.data(), m_sessionKey.size()},
     });
 
-    return {m_clientPublic.to_hex_string(), Botan::hex_encode(m_clientProof)};
+
+    return {toLower(stripHexPrefix(m_clientPublic.to_hex_string())),
+            toLower(Botan::hex_encode(m_clientProof))};
   }
 
   bool verifyServerProof(const std::string &serverProofHex) const {
