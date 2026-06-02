@@ -1,0 +1,111 @@
+name: Tests
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan sqlite python-pip
+          pip install --quiet conan
+          conan profile detect --force
+          conan install . --output-folder=build --build=missing -s build_type=Release -c tools.cmake.cmaketoolchain:generator=Ninja 2>&1 | grep -v "^WARN: deprecated"
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake -Wno-dev
+      - name: Build
+        run: cmake --build build --target cybersec_tests -j$(nproc)
+      - name: Run
+        run: ctest --test-dir build --output-on-failure
+
+  coverage:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan sqlite python-pip
+          pip install --quiet conan
+          conan profile detect --force
+          conan install . --output-folder=build-coverage --build=missing -s build_type=Release -c tools.cmake.cmaketoolchain:generator=Ninja 2>&1 | grep -v "^WARN: deprecated"
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build-coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=build-coverage/conan_toolchain.cmake \
+            -DCMAKE_CXX_FLAGS="-fprofile-instr-generate -fcoverage-mapping" \
+            -Wno-dev
+      - name: Build
+        run: cmake --build build-coverage --target cybersec_tests -j$(nproc)
+      - name: Run
+        run: LLVM_PROFILE_FILE="$(pwd)/build-coverage/coverage-%p.profraw" ctest --test-dir build-coverage --output-on-failure
+      - name: Merge profiles
+        run: llvm-profdata merge -sparse build-coverage/coverage-*.profraw -o coverage.profdata
+      - name: Report coverage
+        run: |
+          llvm-cov report ./build-coverage/cybersec_tests \
+            -instr-profile=coverage.profdata \
+            --ignore-filename-regex='_deps|\.test\.cpp|network/|send_receive' \
+            | tee coverage_report.txt
+          awk '/TOTAL/{if ($10+0 < 80.0) {print "Coverage below 80%: " $10; exit 1}}' \
+            coverage_report.txt
+
+  sanitise:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan
+            cxx_flags: "-fsanitize=address -fno-omit-frame-pointer"
+            linker_flags: "-fsanitize=address"
+          - name: UBSan
+            cxx_flags: "-fsanitize=undefined -fno-omit-frame-pointer"
+            linker_flags: "-fsanitize=undefined"
+          - name: TSan
+            cxx_flags: "-fsanitize=thread -fno-omit-frame-pointer"
+            linker_flags: "-fsanitize=thread"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang llvm git openssl curl nlohmann-json qrencode botan sqlite python-pip
+          pip install --quiet conan
+          conan profile detect --force
+          conan install . --output-folder=build --build=missing -s build_type=Debug -c tools.cmake.cmaketoolchain:generator=Ninja --quiet
+      - name: Configure with ${{ matrix.name }}
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
+            -DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker_flags }}" \
+            -Wno-dev
+      - name: Build
+        run: cmake --build build --target cybersec_tests -j$(nproc)
+      - name: Run under ${{ matrix.name }}
+        env:
+          ASAN_OPTIONS: "halt_on_error=1:detect_leaks=1"
+          LSAN_OPTIONS: "suppressions=/__w/cpp-client/cpp-client/lsan.supp"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+          TSAN_OPTIONS: "halt_on_error=1"
+        run: ctest --test-dir build --output-on-failure

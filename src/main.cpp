@@ -1,828 +1,1137 @@
-#include "User.hpp"
-#include "Message.hpp"
-#include "MessageStore.hpp"
-#include "ApiClient.hpp"
-#include "CryptoManager.hpp"
-#include "Group.hpp"
-#include "BlockchainManager.hpp"
-
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
-
-#include <openssl/evp.h>
-
-#include <string>
-#include <vector>
-#include <map>
-#include <unordered_map>
-#include <algorithm>
-#include <ctime>
-#include <filesystem>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <mutex>
+#include <openssl/crypto.h>
+#include <ranges>
+#include <set>
 #include <sstream>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+import securemsg.models;
+import securemsg.crypto;
+import securemsg.messaging;
+import securemsg.network;
+import securemsg.main_logic;
 
 using namespace ftxui;
-namespace fs = std::filesystem;
 
-static const std::string BASE_URL          = "https://BobbyTables.theburkenator.com";
-static const std::string KEY_FILE          = "identity.key";
-static const std::string BLOCKCHAIN_SCRIPT = "../blockchain/scripts/recordSegmentRoot.js";
-static constexpr int     SEGMENT_SIZE      = 5;
+static constexpr int DIALOG_MIN_WIDTH = 52;
+static constexpr const char *DELETE_LABEL = " \U0001f5d1 ";
+static constexpr int MAIN_PANEL_MIN_WIDTH = 60;
+static constexpr int INPUT_LINE_HEIGHT = 1;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+enum class AppScreen { Welcome, Register, Login, Main };
 
-static int parseId(const std::string& s) {
-    std::size_t i = s.find_first_not_of(" \t\r\n");
-    if (i == std::string::npos) throw std::invalid_argument("empty");
-    return std::stoi(s.substr(i));
+struct AppState {
+  AppScreen screen{AppScreen::Welcome};
+
+  std::string regUsername, regPassword, regStatus;
+  bool regShowTotp{false};
+  std::string regTotpUri, regTotpCode, regTotpStatus;
+
+  std::string loginUsername, loginPassword, loginStatus;
+  bool loginShowTotp{false};
+  std::string loginPreAuthToken, loginTotpCode, loginTotpStatus;
+  int32_t pendingUserId{-1};
+
+  std::optional<LocalUser> localUser;
+
+  RatchetMap ratchets;
+  GroupRatchetMap groupRatchets;
+  GroupSenderKeys groupSenderKeys;
+  SkdmEpochTracker skdmTracker;
+
+  std::vector<Contact> contactCache;
+  std::vector<Contact> contacts;
+  std::vector<Group> groups;
+  int32_t selectedContactId{-1};
+  int32_t selectedGroupId{-1};
+  bool viewingGroup{false};
+  std::optional<MessageStore> messageStore;
+  std::string composeText;
+
+  int32_t selectedMsgId{-1};
+  std::string statusMsg;
+  bool msgsDirty{false};
+
+  // Group epoch tracking for membership change warnings
+  std::unordered_map<int32_t, int32_t> knownGroupEpochs;
+
+  bool showIdentityOverlay{false};
+  std::string overlayTargetName;
+  std::string overlayKeyB64;
+  bool overlayVerified{false};
+
+  std::unique_ptr<struct Poller> poller;
+  std::mutex stateMutex;   // guards Poller→UI writes: contacts and groups
+  std::mutex messageMutex; // guards ratchets, groupRatchets, messageStore
+
+  // Shared UI state for contact/group menu (must outlive makeMainScreen)
+  std::shared_ptr<std::vector<std::string>> allLabels =
+      std::make_shared<std::vector<std::string>>();
+  // Shared UI state for message list menu
+  std::shared_ptr<std::vector<std::string>> msgLabels =
+      std::make_shared<std::vector<std::string>>();
+  std::shared_ptr<std::vector<int32_t>> msgIds =
+      std::make_shared<std::vector<int32_t>>();
+  std::shared_ptr<std::vector<bool>> msgSent =
+      std::make_shared<std::vector<bool>>();
+  std::string addContactUsername; // input for adding contacts
+  std::string newGroupName;                    // input for new group name
+  bool creatingGroup{false};                   // whether group creation mode is active
+  std::set<int32_t> selectedGroupMembers;      // contacts selected for new group
+  int menuSelected{0};  // selected index in contacts/groups menu
+  int msgSelected{0};   // selected index in message list
+  int splitPos{32};     // resizable split position
+  int tabIdx{0};        // 0=main, 1=overlay
+};
+
+struct PipeDeleter {
+  void operator()(FILE *f) const { pclose(f); }
+};
+using PipePtr = std::unique_ptr<FILE, PipeDeleter>;
+
+static Element qrElement(const std::string &uri) {
+  const auto pipe =
+      PipePtr(popen(("qrencode -t UTF8 -o - -- '" + uri + "'").c_str(), "r"));
+  if (!pipe)
+    return paragraph(" Install qrencode: sudo dnf install qrencode ") |
+           color(Color::Red);
+
+  std::string out;
+  std::array<char, 256> buf{};
+  while (fgets(buf.data(), buf.size(), pipe.get()))
+    out += buf.data();
+
+  if (out.empty())
+    return paragraph(" qrencode failed ") | color(Color::Red);
+
+  Elements rows;
+  std::istringstream ss(out);
+  std::string line;
+  while (std::getline(ss, line))
+    rows.push_back(text(line));
+  return vbox(std::move(rows));
 }
 
-static std::string fmtTs(int64_t epoch) {
-    std::time_t t = static_cast<std::time_t>(epoch);
-    char buf[20];
-    std::strftime(buf, sizeof(buf), "%m-%d %H:%M", std::localtime(&t));
-    return buf;
+// Publishes the local user's full key bundle to the server.
+static void publishBundle(const ApiClient &api, const LocalUser &user) {
+  const auto &kb = user.getKeyBundle();
+  std::vector<std::string> opkPubs;
+  opkPubs.reserve(kb.opks.size());
+  std::ranges::transform(kb.opks, std::back_inserter(opkPubs),
+                         [](const auto &k) { return base64Encode(k.pub); });
+  api.publishKeyBundle(user.getAccessToken(), base64Encode(kb.ik.pub),
+                       base64Encode(kb.ikX.pub), base64Encode(kb.ikXSig),
+                       base64Encode(kb.spk.pub), base64Encode(kb.spkSig),
+                       opkPubs, base64Encode(kb.pq.pub),
+                       base64Encode(kb.pqSig));
 }
 
-static std::string convId(int a, int b) {
-    return "direct-" + std::to_string(std::min(a,b)) + "-" + std::to_string(std::max(a,b));
-}
-
-static std::vector<uint8_t> loadOrCreateKey(const std::string& pass,
-                                             std::vector<uint8_t>& pubOut) {
-    std::vector<uint8_t> priv;
-    if (fs::exists(KEY_FILE)) {
-        priv = CryptoManager::loadPrivateKey(KEY_FILE, pass);
-    } else {
-        auto [p, q] = CryptoManager::generateX25519KeyPair();
-        priv = p; pubOut = q;
-        CryptoManager::savePrivateKey(KEY_FILE, priv, pass);
-        return priv;
-    }
-    EVP_PKEY* pk = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, priv.data(), 32);
-    std::size_t n = 32;
-    pubOut.resize(32);
-    EVP_PKEY_get_raw_public_key(pk, pubOut.data(), &n);
-    EVP_PKEY_free(pk);
-    return priv;
-}
-
-// ── Screen indices ────────────────────────────────────────────────────────────
-
-static constexpr int SCR_WELCOME    = 0;
-static constexpr int SCR_REGISTER   = 1;
-static constexpr int SCR_LOGIN      = 2;
-static constexpr int SCR_TOTP       = 3;
-static constexpr int SCR_PASSPHRASE = 4;
-static constexpr int SCR_MAIN       = 5;
-
-// ── main ──────────────────────────────────────────────────────────────────────
-
-int main() {
-    auto screen = ScreenInteractive::Fullscreen();
-    ApiClient api(BASE_URL, /*verifyTls=*/true);
-
-    // ── Shared state ──────────────────────────────────────────────────────────
-    int scr = SCR_WELCOME;
-
-    // Auth inputs
-    std::string regUser, regPass, regStatus;
-    std::string loginUser, loginPass, loginStatus;
-    std::string totpCode, totpStatus;
-    std::string passStr, passStatus;
-    std::string preAuthToken;
-    SrpSession  srpSession;
-
-    // Session
-    std::string sessionUser, accessToken, refreshToken;
-    int myUserId = 0;
-    std::vector<uint8_t> myPriv, myPub;
-
-    // Messages
-    MessageStore store;
-    std::vector<std::string> msgLines;
-    std::string sendTo, sendText;
-    std::string ackIdStr, revIdStr;
-
-    // Groups
-    int grpSubTab = 0;
-    std::vector<std::string> grpListLines, grpMsgLines;
-    std::string newGrpName, addGrpId, addMemId;
-    std::string sndGrpId, sndGrpText;
-    std::string fetchGrpId;
-    std::string grpStatus;
-    std::map<int, std::vector<uint8_t>> groupKeys;
-
-    // Blockchain
-    std::map<std::string, std::vector<MessageEnvelope>> segBuf;
-    std::map<std::string, int> segIdx;
-    std::vector<std::string> chainLines;
-    std::string chainConvInput, chainStatus;
-    // Per-session digest & proof state
-    std::vector<MessageEnvelope>  chainLastEnvs;
-    SegmentDigest                 chainDigest;
-    std::vector<nlohmann::json>   chainProofPackages;
-    std::string chainProofInput;      // user pastes chain proof JSON here
-    std::string chainContractAddr;
-    std::string chainRpcUrl = "https://rpc.sepolia.org";
-    std::string chainVerifyInput;     // user pastes one proof package JSON here
-    std::string chainVerifyResult;
-
-    // Main tab
-    int mainTab = 0;
-    const std::vector<std::string> mainTabNames = {
-        " Messages ", " Groups ", " Blockchain ", " Account "
-    };
-
-    // Status bar
-    std::string statusMsg;
-    bool statusErr = false;
-
-    // ── Lambda helpers ────────────────────────────────────────────────────────
-
-    auto setStatus = [&](std::string msg, bool err = false) {
-        statusMsg = std::move(msg); statusErr = err;
-    };
-
-    auto grpKey = [&](int gid) -> std::vector<uint8_t>& {
-        if (!groupKeys.count(gid)) groupKeys[gid] = CryptoManager::randomBytes(32);
-        return groupKeys[gid];
-    };
-
-    // ── Welcome ───────────────────────────────────────────────────────────────
-
-    auto wBtn_login    = Button("  Login  ",    [&]{ scr = SCR_LOGIN; });
-    auto wBtn_register = Button("  Register  ", [&]{ scr = SCR_REGISTER; });
-    auto wBtn_quit     = Button("  Quit  ",     screen.ExitLoopClosure());
-
-    auto welcome_comp = Renderer(
-        Container::Vertical({wBtn_login, wBtn_register, wBtn_quit}),
-        [&]{
-            return vbox({
-                filler(),
-                hbox({filler(),
-                    vbox({
-                        text("  SecureMsg  ") | bold | center,
-                        text(" End-to-end encrypted messaging ") | dim | center,
-                        text(" " + BASE_URL + " ") | dim | center,
-                        separator(),
-                        text(""),
-                        hbox({filler(),
-                            wBtn_login->Render(),
-                            text("  "),
-                            wBtn_register->Render(),
-                            filler()}),
-                        text(""),
-                        hbox({filler(), wBtn_quit->Render() | dim, filler()}),
-                        text(""),
-                    }) | border | size(WIDTH, GREATER_THAN, 48),
-                filler()}),
-                filler(),
-            });
-        }
-    );
-
-    // ── Register ──────────────────────────────────────────────────────────────
-
-    auto rUser  = Input(&regUser, "username");
-    InputOption rPassOpt; rPassOpt.password = true;
-    auto rPass  = Input(&regPass, "password", rPassOpt);
-
-    auto rBtn_submit = Button(" Register ", [&]{
-        if (regUser.empty() || regPass.empty()) {
-            regStatus = "Username and password required."; return;
-        }
-        try {
-            regStatus = "Computing SRP verifier…";
-            std::string saltHex;
-            auto verifier = CryptoManager::computeSrpVerifier(regUser, regPass, saltHex);
-            auto res = api.registerUser(regUser, saltHex, verifier);
-            std::string msg = "Registered! User ID: " + std::to_string(res["user_id"].get<int>());
-            if (res.contains("totp_provisioning_uri"))
-                msg += "\n\nScan TOTP URI in authenticator:\n" +
-                       res["totp_provisioning_uri"].get<std::string>();
-            regStatus = msg;
-        } catch (const std::exception& e) { regStatus = "Error: " + std::string(e.what()); }
-    });
-    auto rBtn_back = Button(" Back ", [&]{ scr = SCR_WELCOME; regStatus.clear(); });
-
-    auto register_comp = Renderer(
-        Container::Vertical({rUser, rPass, rBtn_submit, rBtn_back}),
-        [&]{
-            return vbox({filler(),
-                hbox({filler(),
-                    vbox({
-                        text(" Register ") | bold | center,
-                        separator(),
-                        hbox({text(" Username : "), rUser->Render() | flex}),
-                        separator(),
-                        hbox({text(" Password : "), rPass->Render() | flex}),
-                        separator(),
-                        hbox({filler(), rBtn_submit->Render(), text("  "), rBtn_back->Render(), filler()}),
-                        regStatus.empty() ? text("") :
-                            paragraph(" " + regStatus) | color(
-                                regStatus.rfind("Error", 0) == 0 ? Color::Red : Color::Green),
-                    }) | border | size(WIDTH, GREATER_THAN, 52),
-                filler()}),
-            filler()});
-        }
-    );
-
-    // ── Login ─────────────────────────────────────────────────────────────────
-
-    auto lUser = Input(&loginUser, "username");
-    InputOption lPassOpt; lPassOpt.password = true;
-    auto lPass = Input(&loginPass, "password", lPassOpt);
-
-    auto lBtn_submit = Button(" Login ", [&]{
-        if (loginUser.empty() || loginPass.empty()) {
-            loginStatus = "Username and password required."; return;
-        }
-        try {
-            loginStatus = "Authenticating…";
-            srpSession = SrpSession{};
-            auto A = srpSession.begin(loginUser, loginPass);
-            auto init   = api.srpInit(loginUser, A);
-            auto verify = api.srpVerify(init["session_id"],
-                srpSession.computeProof(init["srp_salt"], init["server_public"]));
-            if (!srpSession.verifyServerProof(verify["server_proof"].get<std::string>())) {
-                loginStatus = "ERROR: Server proof invalid — possible MITM!"; return;
-            }
-            preAuthToken = verify["pre_auth_token"].get<std::string>();
-            sessionUser  = loginUser;
-            loginStatus.clear();
-            scr = SCR_TOTP;
-        } catch (const std::exception& e) { loginStatus = "Error: " + std::string(e.what()); }
-    });
-    auto lBtn_back = Button(" Back ", [&]{ scr = SCR_WELCOME; loginStatus.clear(); });
-
-    auto login_comp = Renderer(
-        Container::Vertical({lUser, lPass, lBtn_submit, lBtn_back}),
-        [&]{
-            return vbox({filler(),
-                hbox({filler(),
-                    vbox({
-                        text(" Login ") | bold | center,
-                        separator(),
-                        hbox({text(" Username : "), lUser->Render() | flex}),
-                        separator(),
-                        hbox({text(" Password : "), lPass->Render() | flex}),
-                        separator(),
-                        hbox({filler(), lBtn_submit->Render(), text("  "), lBtn_back->Render(), filler()}),
-                        loginStatus.empty() ? text("") :
-                            text(" " + loginStatus) | color(Color::Red),
-                    }) | border | size(WIDTH, GREATER_THAN, 52),
-                filler()}),
-            filler()});
-        }
-    );
-
-    // ── TOTP ──────────────────────────────────────────────────────────────────
-
-    auto tCode = Input(&totpCode, "6-digit code");
-
-    auto tBtn_verify = Button(" Verify ", [&]{
-        if (totpCode.empty()) { totpStatus = "Enter your TOTP code."; return; }
-        try {
-            auto tokens  = api.verify2FA(preAuthToken, totpCode);
-            accessToken  = tokens["access_token"].get<std::string>();
-            refreshToken = tokens["refresh_token"].get<std::string>();
-            totpCode.clear(); totpStatus.clear();
-            scr = SCR_PASSPHRASE;
-        } catch (const std::exception& e) { totpStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto totp_comp = Renderer(
-        Container::Vertical({tCode, tBtn_verify}),
-        [&]{
-            return vbox({filler(),
-                hbox({filler(),
-                    vbox({
-                        text(" Two-Factor Authentication ") | bold | center,
-                        text(" Enter the 6-digit code from your authenticator app. ") | dim | center,
-                        separator(),
-                        hbox({text(" Code : "), tCode->Render() | flex}),
-                        separator(),
-                        hbox({filler(), tBtn_verify->Render(), filler()}),
-                        totpStatus.empty() ? text("") :
-                            text(" " + totpStatus) | color(Color::Red),
-                    }) | border | size(WIDTH, GREATER_THAN, 48),
-                filler()}),
-            filler()});
-        }
-    );
-
-    // ── Passphrase ────────────────────────────────────────────────────────────
-
-    InputOption ppOpt; ppOpt.password = true;
-    auto ppInput = Input(&passStr, "key passphrase", ppOpt);
-
-    auto ppBtn = Button(" Continue ", [&]{
-        if (passStr.empty()) { passStatus = "Passphrase required."; return; }
-        try {
-            myPriv = loadOrCreateKey(passStr, myPub);
-            passStr.clear(); passStatus.clear();
-            // Best-effort: look up our user ID if we already have a key bundle published.
-            try {
-                auto me = api.lookupByUsername(accessToken, sessionUser);
-                myUserId = me["user_id"].get<int>();
-            } catch (...) {}
-            scr = SCR_MAIN;
-            setStatus("Welcome, " + sessionUser + "!");
-        } catch (const std::exception& e) { passStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto passphrase_comp = Renderer(
-        Container::Vertical({ppInput, ppBtn}),
-        [&]{
-            return vbox({filler(),
-                hbox({filler(),
-                    vbox({
-                        text(" Identity Key ") | bold | center,
-                        text(" Enter your passphrase to unlock or create your identity key. ") | dim | center,
-                        separator(),
-                        hbox({text(" Passphrase : "), ppInput->Render() | flex}),
-                        separator(),
-                        hbox({filler(), ppBtn->Render(), filler()}),
-                        passStatus.empty() ? text("") :
-                            text(" " + passStatus) | color(Color::Red),
-                    }) | border | size(WIDTH, GREATER_THAN, 52),
-                filler()}),
-            filler()});
-        }
-    );
-
-    // ── Main — Messages tab ───────────────────────────────────────────────────
-
-    auto mSendTo  = Input(&sendTo,  "user ID");
-    auto mSendTxt = Input(&sendText, "type message here");
-    auto mAckId   = Input(&ackIdStr, "msg ID");
-    auto mRevId   = Input(&revIdStr, "msg ID");
-
-    auto mBtn_fetch = Button(" Fetch ", [&]{
-        try {
-            setStatus("Fetching…");
-            auto msgs = api.listMessages(accessToken);
-            if (msgs.empty()) { setStatus("No new messages."); return; }
-            std::unordered_map<int, std::vector<uint8_t>> keyCache;
-            for (const auto& m : msgs) {
-                int     id    = m["id"];
-                int     sid   = m["sender_id"];
-                int64_t ts    = m.value("sent_at", int64_t(0));
-                auto    ct    = m["ciphertext"].get<std::string>();
-                auto    hdr   = m["ratchet_header_enc"].get<std::string>();
-                std::string plain;
-                try {
-                    if (!keyCache.count(sid)) {
-                        auto kb = api.getKeyBundle(accessToken, sid);
-                        keyCache[sid] = CryptoManager::base64Decode(
-                            kb["identity_pub"].get<std::string>());
-                    }
-                    auto ep  = CryptoManager::base64Decode(hdr);
-                    auto key = CryptoManager::recoverMessageKey(myPriv, myPub, keyCache[sid], ep);
-                    auto pkt = CryptoManager::unpackAead(CryptoManager::base64Decode(ct));
-                    plain    = CryptoManager::aeadDecrypt(pkt, key);
-                } catch (const std::exception& e) {
-                    plain = "[decrypt failed: " + std::string(e.what()) + "]";
-                }
-                Message msg(id, sid, 0, ct, hdr, ts, Message::Direction::Received);
-                msg.setPlaintext(plain);
-                store.addMessage(msg);
-                std::ostringstream line;
-                line << "[" << id << "] uid:" << sid << "  " << fmtTs(ts) << "  " << plain;
-                msgLines.push_back(line.str());
-                // Buffer for blockchain
-                std::string cid = convId(sid, myUserId);
-                MessageEnvelope env;
-                env.conversationId   = cid;
-                env.messageId        = std::to_string(id);
-                env.senderId         = std::to_string(sid);
-                env.recipientId      = std::to_string(myUserId);
-                env.ciphertext       = ct;
-                env.ratchetHeaderEnc = hdr;
-                env.sentAt           = ts;
-                segBuf[cid].push_back(env);
-            }
-            setStatus("Fetched " + std::to_string(msgs.size()) + " message(s).");
-        } catch (const std::exception& e) { setStatus("Fetch error: " + std::string(e.what()), true); }
-    });
-
-    auto mBtn_send = Button(" Send ", [&]{
-        if (sendTo.empty() || sendText.empty()) {
-            setStatus("Enter recipient ID and message.", true); return;
-        }
-        try {
-            int rid = parseId(sendTo);
-            auto bundle  = api.getKeyBundle(accessToken, rid);
-            auto rPub    = CryptoManager::base64Decode(bundle["identity_pub"].get<std::string>());
-            auto [mk,ep] = CryptoManager::deriveMessageKey(myPriv, myPub, rPub);
-            auto pkt     = CryptoManager::aeadEncrypt(sendText, mk);
-            auto packed  = CryptoManager::packAead(pkt);
-            auto resp    = api.sendMessage(accessToken, rid,
-                               CryptoManager::base64Encode(packed),
-                               CryptoManager::base64Encode(ep));
-            int rid2 = resp["id"].get<int>();
-            msgLines.push_back("[" + std::to_string(rid2) + "] SENT → uid:" +
-                               sendTo + "  " + sendText);
-            sendText.clear();
-            setStatus("Sent (ID: " + std::to_string(rid2) + ").");
-        } catch (const std::exception& e) { setStatus("Send error: " + std::string(e.what()), true); }
-    });
-
-    auto mBtn_ack = Button(" Ack ", [&]{
-        try {
-            api.acknowledgeReceipt(accessToken, parseId(ackIdStr));
-            store.removeById(parseId(ackIdStr));
-            setStatus("Acknowledged " + ackIdStr + ".");
-            ackIdStr.clear();
-        } catch (const std::exception& e) { setStatus("Ack error: " + std::string(e.what()), true); }
-    });
-
-    auto mBtn_revoke = Button(" Revoke ", [&]{
-        try {
-            api.revokeMessage(accessToken, parseId(revIdStr), "");
-            setStatus("Revoked " + revIdStr + ".");
-            revIdStr.clear();
-        } catch (const std::exception& e) { setStatus("Revoke error: " + std::string(e.what()), true); }
-    });
-
-    auto messages_tab = Renderer(
-        Container::Vertical({mSendTo, mSendTxt, mBtn_fetch, mBtn_send,
-                             mAckId, mBtn_ack, mRevId, mBtn_revoke}),
-        [&]{
-            Elements lines;
-            for (const auto& l : msgLines) lines.push_back(text(l));
-            if (lines.empty())
-                lines.push_back(text("No messages — press Fetch to load.") | dim);
-            return vbox({
-                vbox(std::move(lines)) | yframe | flex,
-                separator(),
-                hbox({text(" To: "), mSendTo->Render() | size(WIDTH, EQUAL, 8),
-                      text("  "), mSendTxt->Render() | flex,
-                      text("  "), mBtn_send->Render(),
-                      text("  "), mBtn_fetch->Render()}),
-                hbox({text(" Ack: "),    mAckId->Render()  | size(WIDTH, EQUAL, 6),
-                      text("  "), mBtn_ack->Render(),
-                      text("    Revoke: "), mRevId->Render() | size(WIDTH, EQUAL, 6),
-                      text("  "), mBtn_revoke->Render(), filler()}),
-            });
-        }
-    );
-
-    // ── Main — Groups tab ─────────────────────────────────────────────────────
-
-    const std::vector<std::string> grpSubNames = {
-        " List ", " Create ", " Add Member ", " Send ", " Fetch Msgs "
-    };
-    auto grpToggle = Toggle(&grpSubNames, &grpSubTab);
-
-    auto gNameIn   = Input(&newGrpName, "group name");
-    auto gGrpIdIn  = Input(&addGrpId,   "group ID");
-    auto gMemIdIn  = Input(&addMemId,   "user ID");
-    auto gSndGrpIn = Input(&sndGrpId,   "group ID");
-    auto gSndTxtIn = Input(&sndGrpText, "message");
-    auto gFetchIn  = Input(&fetchGrpId, "group ID");
-
-    auto gBtn_list = Button(" Refresh ", [&]{
-        try {
-            auto resp = api.listGroups(accessToken);
-            auto gs   = resp.value("groups", nlohmann::json::array());
-            grpListLines.clear();
-            for (const auto& g : gs)
-                grpListLines.push_back(
-                    "[" + std::to_string(g["id"].get<int>()) + "] " +
-                    g["name"].get<std::string>() +
-                    "  members:" + std::to_string(g["members"].size()) +
-                    "  epoch:"   + std::to_string(g.value("epoch", 0)));
-            grpStatus = "Loaded " + std::to_string(gs.size()) + " group(s).";
-        } catch (const std::exception& e) { grpStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto gBtn_create = Button(" Create ", [&]{
-        try {
-            auto r = api.createGroup(accessToken, newGrpName);
-            grpStatus = "Created group ID: " + std::to_string(r["id"].get<int>());
-            newGrpName.clear();
-        } catch (const std::exception& e) { grpStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto gBtn_addMem = Button(" Add Member ", [&]{
-        try {
-            if (addGrpId.empty() || addMemId.empty()) {
-                grpStatus = "Enter group ID and user ID."; return;
-            }
-            int gid = parseId(addGrpId), uid = parseId(addMemId);
-            auto bundle  = api.getKeyBundle(accessToken, uid);
-            auto mPub    = CryptoManager::base64Decode(bundle["identity_pub"].get<std::string>());
-            auto& sk     = grpKey(gid);
-            auto [mk,ep] = CryptoManager::deriveMessageKey(myPriv, myPub, mPub);
-            auto pkt     = CryptoManager::aeadEncrypt(std::string(sk.begin(), sk.end()), mk);
-            auto packed  = CryptoManager::packAead(pkt);
-            // Payload: senderPub(32) + ephemeralPub(32) + packed_aead
-            // Recipient needs senderPub to call recoverMessageKey.
-            std::vector<uint8_t> payload;
-            payload.insert(payload.end(), myPub.begin(),  myPub.end());
-            payload.insert(payload.end(), ep.begin(),     ep.end());
-            payload.insert(payload.end(), packed.begin(), packed.end());
-            api.addGroupMember(accessToken, gid, uid, CryptoManager::base64Encode(payload));
-            grpStatus = "Added user " + addMemId + " to group " + addGrpId;
-            addMemId.clear();
-        } catch (const std::exception& e) { grpStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto gBtn_send = Button(" Send ", [&]{
-        try {
-            if (sndGrpId.empty()) { grpStatus = "Enter group ID."; return; }
-            int gid   = parseId(sndGrpId);
-            auto& sk  = grpKey(gid);
-            auto pkt  = CryptoManager::aeadEncrypt(sndGrpText, sk);
-            auto gi   = api.getGroup(accessToken, gid);
-            auto resp = api.sendGroupMessage(accessToken, gid, gi.value("epoch", 0),
-                            CryptoManager::base64Encode(CryptoManager::packAead(pkt)));
-            grpStatus = "Group message sent (ID: " + std::to_string(resp["id"].get<int>()) + ")";
-            sndGrpText.clear();
-        } catch (const std::exception& e) { grpStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto gBtn_fetch = Button(" Fetch ", [&]{
-        try {
-            if (fetchGrpId.empty()) { grpStatus = "Enter group ID."; return; }
-            int gid = parseId(fetchGrpId);
-
-            // Drain any pending SKDMs to update the group key.
-            auto skdmResp = api.fetchSkdm(accessToken, gid);
-            auto skdmList = skdmResp.value("skdm_ciphertexts", nlohmann::json::array());
-            for (const auto& entry : skdmList) {
-                auto raw = CryptoManager::base64Decode(entry["ciphertext"].get<std::string>());
-                // Payload layout: senderPub(32) + ephemPub(32) + packed_aead
-                if (raw.size() > 64) {
-                    std::vector<uint8_t> senderPub(raw.begin(),      raw.begin() + 32);
-                    std::vector<uint8_t> ephPub   (raw.begin() + 32, raw.begin() + 64);
-                    std::vector<uint8_t> packed   (raw.begin() + 64, raw.end());
-                    auto mk = CryptoManager::recoverMessageKey(myPriv, myPub, senderPub, ephPub);
-                    auto plainGK = CryptoManager::aeadDecrypt(CryptoManager::unpackAead(packed), mk);
-                    groupKeys[gid] = std::vector<uint8_t>(plainGK.begin(), plainGK.end());
-                }
-            }
-
-            auto msgs = api.listGroupMessages(accessToken, gid);
-            auto& sk  = grpKey(gid);
-            grpMsgLines.clear();
-            for (const auto& m : msgs) {
-                std::string plain;
-                try {
-                    auto pkt = CryptoManager::unpackAead(
-                        CryptoManager::base64Decode(m["ciphertext"].get<std::string>()));
-                    plain = CryptoManager::aeadDecrypt(pkt, sk);
-                } catch (...) { plain = "[decrypt failed]"; }
-                grpMsgLines.push_back("[" + std::to_string(m["id"].get<int>()) + "] " + plain);
-            }
-            grpStatus = "Fetched " + std::to_string(msgs.size()) + " message(s).";
-        } catch (const std::exception& e) { grpStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto grpListTab   = Renderer(Container::Vertical({gBtn_list}), [&]{
-        Elements ls; for (auto& l : grpListLines) ls.push_back(text(l));
-        if (ls.empty()) ls.push_back(text("No groups — press Refresh.") | dim);
-        return vbox({vbox(std::move(ls)) | flex, separator(), hbox({gBtn_list->Render(), filler()})});
-    });
-    auto grpCreateTab = Renderer(Container::Vertical({gNameIn, gBtn_create}), [&]{
-        return vbox({hbox({text(" Name: "), gNameIn->Render() | flex}), separator(),
-                     hbox({filler(), gBtn_create->Render(), filler()})});
-    });
-    auto grpAddTab    = Renderer(Container::Vertical({gGrpIdIn, gMemIdIn, gBtn_addMem}), [&]{
-        return vbox({hbox({text(" Group ID : "), gGrpIdIn->Render() | size(WIDTH, EQUAL, 6)}),
-                     hbox({text(" User ID  : "), gMemIdIn->Render() | size(WIDTH, EQUAL, 6)}),
-                     separator(), hbox({filler(), gBtn_addMem->Render(), filler()})});
-    });
-    auto grpSendTab   = Renderer(Container::Vertical({gSndGrpIn, gSndTxtIn, gBtn_send}), [&]{
-        return vbox({hbox({text(" Group ID : "), gSndGrpIn->Render() | size(WIDTH, EQUAL, 6)}),
-                     hbox({text(" Message  : "), gSndTxtIn->Render() | flex}),
-                     separator(), hbox({filler(), gBtn_send->Render(), filler()})});
-    });
-    auto grpFetchTab  = Renderer(Container::Vertical({gFetchIn, gBtn_fetch}), [&]{
-        Elements ls; for (auto& l : grpMsgLines) ls.push_back(text(l));
-        if (ls.empty()) ls.push_back(text("No messages fetched.") | dim);
-        return vbox({vbox(std::move(ls)) | flex, separator(),
-                     hbox({text(" Group ID: "), gFetchIn->Render() | size(WIDTH, EQUAL, 6),
-                           text("  "), gBtn_fetch->Render()})});
-    });
-
-    auto grpSubContent = Container::Tab(
-        {grpListTab, grpCreateTab, grpAddTab, grpSendTab, grpFetchTab}, &grpSubTab);
-
-    auto groups_tab = Renderer(Container::Vertical({grpToggle, grpSubContent}), [&]{
-        return vbox({grpToggle->Render(), separator(), grpSubContent->Render() | flex, separator(),
-                     text(" " + grpStatus) | color(Color::Yellow)});
-    });
-
-    // ── Main — Blockchain tab ─────────────────────────────────────────────────
-
-    auto cConvIn       = Input(&chainConvInput,   "conversation ID, e.g. direct-1-2");
-    auto cContractIn   = Input(&chainContractAddr, "0x contract address");
-    auto cRpcIn        = Input(&chainRpcUrl,       "RPC URL");
-    auto cProofIn      = Input(&chainProofInput,   "paste chain proof JSON here");
-    auto cVerifyIn     = Input(&chainVerifyInput,  "paste proof package JSON here");
-
-    auto cBtn_refresh = Button(" Refresh ", [&]{
-        chainLines.clear();
-        if (segBuf.empty()) { chainStatus = "No segments buffered — fetch messages first."; return; }
-        for (const auto& [cid, msgs] : segBuf) {
-            int cnt = static_cast<int>(msgs.size());
-            std::string tag = (cnt >= SEGMENT_SIZE) ? " ● READY" : "";
-            chainLines.push_back(cid + "  " + std::to_string(cnt) + " msg(s)" + tag);
-        }
-        chainStatus = std::to_string(segBuf.size()) + " conversation(s) buffered.";
-    });
-
-    auto cBtn_export = Button(" Export Segment ", [&]{
-        try {
-            if (chainConvInput.empty()) { chainStatus = "Enter a conversation ID."; return; }
-            auto it = segBuf.find(chainConvInput);
-            if (it == segBuf.end()) { chainStatus = "Conversation not in buffer."; return; }
-            auto& buf = it->second;
-            std::vector<MessageEnvelope> seg(buf.begin(),
-                buf.begin() + std::min((int)buf.size(), SEGMENT_SIZE));
-            std::sort(seg.begin(), seg.end(), [](const auto& a, const auto& b){
-                return a.sentAt != b.sentAt ? a.sentAt < b.sentAt : a.messageId < b.messageId;
-            });
-            int idx = ++segIdx[chainConvInput];
-            chainDigest  = BlockchainManager::buildSegmentDigest(seg, chainConvInput, idx);
-            chainLastEnvs = seg;
-            chainProofPackages.clear();
-            auto segFile = BlockchainManager::writeSegmentFile(seg, chainDigest);
-            buf.erase(buf.begin(), buf.begin() + (ptrdiff_t)seg.size());
-            chainLines.clear();
-            chainLines.push_back("Segment : " + chainDigest.segmentId);
-            chainLines.push_back("Hash    : " + chainDigest.segmentHash);
-            chainLines.push_back("File    : " + segFile);
-            chainStatus = "Exported " + segFile + ". Record on Sepolia, then Import Proof.";
-        } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto cBtn_importProof = Button(" Import Proof ", [&]{
-        try {
-            if (chainProofInput.empty()) { chainStatus = "Paste chain proof JSON first."; return; }
-            if (chainLastEnvs.empty())   { chainStatus = "Export a segment first."; return; }
-            auto j = nlohmann::json::parse(chainProofInput, nullptr, false);
-            if (j.is_discarded()) { chainStatus = "Invalid JSON."; return; }
-            chainDigest.transactionHash    = j.value("transaction_hash",   "");
-            chainDigest.contractAddress    = j.value("contract_address",   "");
-            chainDigest.recorder           = j.value("recorder",           "");
-            chainDigest.recordedTimestamp  = j.value("recorded_timestamp", uint64_t{0});
-            chainDigest.chainId            = j.value("chain_id",           11155111);
-            chainDigest.chainName          = j.value("chain_name",         "sepolia");
-            if (!chainContractAddr.empty()) chainDigest.contractAddress = chainContractAddr;
-            chainProofPackages = BlockchainManager::buildProofPackages(chainLastEnvs, chainDigest);
-            chainLines.push_back("Tx      : " + chainDigest.transactionHash);
-            chainLines.push_back("Recorder: " + chainDigest.recorder);
-            chainStatus = "Proof imported. " + std::to_string(chainProofPackages.size()) +
-                          " package(s) ready. Press Export Proof Package.";
-        } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto cBtn_exportPkg = Button(" Export Proof Package ", [&]{
-        try {
-            if (chainProofPackages.empty()) { chainStatus = "Import chain proof first."; return; }
-            auto path = BlockchainManager::writeProofPackagesFile(chainProofPackages, chainDigest.segmentId);
-            chainStatus = "Proof packages written to " + path;
-        } catch (const std::exception& e) { chainStatus = "Error: " + std::string(e.what()); }
-    });
-
-    auto cBtn_verify = Button(" Verify Integrity ", [&]{
-        try {
-            if (chainVerifyInput.empty()) { chainVerifyResult = "Paste a proof package JSON first."; return; }
-            auto pkg = nlohmann::json::parse(chainVerifyInput, nullptr, false);
-            if (pkg.is_discarded()) { chainVerifyResult = "Invalid JSON."; return; }
-
-            std::string localResult = BlockchainManager::verifyLocalHashes(pkg);
-            if (localResult != "OK") { chainVerifyResult = localResult; return; }
-
-            if (chainRpcUrl.empty()) {
-                chainVerifyResult = "Local: OK. (Set RPC URL to also check on-chain.)";
-                return;
-            }
-            chainVerifyResult = "Local: OK. Querying chain…";
-            std::string onChain = BlockchainManager::verifyOnChain(pkg, chainRpcUrl);
-            chainVerifyResult = "Local: OK | Chain: " + onChain;
-        } catch (const std::exception& e) { chainVerifyResult = "Error: " + std::string(e.what()); }
-    });
-
-    auto blockchain_tab = Renderer(
-        Container::Vertical({cConvIn, cContractIn, cRpcIn,
-                             cBtn_refresh, cBtn_export,
-                             cProofIn, cBtn_importProof, cBtn_exportPkg,
-                             cVerifyIn, cBtn_verify}),
-        [&]{
-            Elements ls; for (auto& l : chainLines) ls.push_back(text(l));
-            if (ls.empty()) ls.push_back(text("Press Refresh to see buffered conversations.") | dim);
-            return vbox({
-                vbox(std::move(ls)) | flex,
-                separator(),
-                hbox({cBtn_refresh->Render(), filler()}),
-                separator(),
-                hbox({text(" Conv    : "), cConvIn->Render() | flex,
-                      text("  "), cBtn_export->Render()}),
-                hbox({text(" Contract: "), cContractIn->Render() | flex}),
-                hbox({text(" RPC URL : "), cRpcIn->Render() | flex}),
-                separator(),
-                hbox({text(" Proof   : "), cProofIn->Render() | flex,
-                      text("  "), cBtn_importProof->Render()}),
-                hbox({filler(), cBtn_exportPkg->Render(), filler()}),
-                separator(),
-                hbox({text(" Verify  : "), cVerifyIn->Render() | flex,
-                      text("  "), cBtn_verify->Render()}),
-                text(" " + (chainVerifyResult.empty() ? chainStatus : chainVerifyResult))
-                    | color(Color::Cyan),
-            });
-        }
-    );
-
-    // ── Main — Account tab ────────────────────────────────────────────────────
-
-    auto aBtn_pubKey = Button(" Publish Key ", [&]{
-        try {
-            std::string b64 = CryptoManager::base64Encode(myPub);
-            api.publishKeyBundle(accessToken, {
-                {"identity_pub",      b64}, {"signed_prekey_pub", b64},
-                {"signed_prekey_sig", b64}, {"one_time_prekeys",  nlohmann::json::array()},
-                {"pq_prekey_pub",     b64}, {"pq_prekey_sig",     b64}
-            });
-            auto me = api.lookupByUsername(accessToken, sessionUser);
-            myUserId = me["user_id"].get<int>();
-            setStatus("Public key published. User ID: " + std::to_string(myUserId));
-        } catch (const std::exception& e) { setStatus("Error: " + std::string(e.what()), true); }
-    });
-
-    auto aBtn_logout = Button(" Logout ", [&]{
-        try { api.logout(refreshToken); } catch (...) {}
-        accessToken.clear(); refreshToken.clear(); myPriv.clear(); myPub.clear(); myUserId = 0;
-        msgLines.clear(); grpListLines.clear(); grpMsgLines.clear();
-        chainLines.clear(); segBuf.clear(); store.clear();
-        chainLastEnvs.clear(); chainDigest = {}; chainProofPackages.clear();
-        chainProofInput.clear(); chainVerifyInput.clear(); chainVerifyResult.clear();
-        scr = SCR_WELCOME;
-        setStatus("Logged out.");
-    });
-
-    auto account_tab = Renderer(Container::Vertical({aBtn_pubKey, aBtn_logout}), [&]{
-        std::string fp = myPub.empty() ? "—" : CryptoManager::toHex(myPub).substr(0, 16) + "…";
+Component makeWelcomeScreen(AppState &state, ScreenInteractive &scr) {
+  auto btnRegister = Button(" Register ", [&] {
+    state.screen = AppScreen::Register;
+    scr.PostEvent(Event::Custom);
+  });
+  auto btnLogin = Button(" Login ", [&] {
+    state.screen = AppScreen::Login;
+    scr.PostEvent(Event::Custom);
+  });
+
+  return Renderer(
+      Container::Horizontal({btnRegister, btnLogin}),
+      [&, btnRegister, btnLogin] {
         return vbox({
-            text(""),
-            hbox({text("  Username  : "), text(sessionUser) | bold}),
-            hbox({text("  User ID   : "), text(myUserId ? std::to_string(myUserId) : "— (publish key to resolve)") | dim}),
-            hbox({text("  Key ID    : "), text(fp) | dim}),
-            hbox({text("  Cached    : "), text(std::to_string(store.size()) + " messages") | dim}),
-            text(""),
-            separator(),
-            text(""),
-            hbox({text("  "), aBtn_pubKey->Render()}),
-            text(""),
-            hbox({text("  "), aBtn_logout->Render() | color(Color::Red)}),
+            filler(),
+            hbox({filler(),
+                  vbox({
+                      text(" SecureMsg ") | bold | center,
+                      text(" Signal Protocol + Post-Quantum E2E Encryption ") |
+                          dim | center,
+                      separator(),
+                      hbox({filler(), btnRegister->Render(), text("  "),
+                            btnLogin->Render(), filler()}),
+                  }) | border |
+                      size(WIDTH, GREATER_THAN, DIALOG_MIN_WIDTH),
+                  filler()}),
             filler(),
         });
-    });
+      });
+}
 
-    // ── Main (tabbed) ─────────────────────────────────────────────────────────
+Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
+                             const ApiClient &api) {
+  auto rUser = Input(&state.regUsername, "username");
+  rUser |= CatchEvent([&](const Event &) {
+    std::erase(state.regUsername, '\n');
+    return false;
+  });
+  auto rPass = Input(&state.regPassword, "password",
+                     InputOption{.transform = {}, .password = true});
+  rPass |= CatchEvent([&](const Event &) {
+    std::erase(state.regPassword, '\n');
+    return false;
+  });
+  auto tCode = Input(&state.regTotpCode, "6-digit code");
+  tCode |= CatchEvent([&](const Event &) {
+    std::erase_if(state.regTotpCode,
+                  [](const char c) { return !std::isdigit(c); });
+    return false;
+  });
 
-    auto mainToggle  = Toggle(&mainTabNames, &mainTab);
-    auto mainContent = Container::Tab(
-        {messages_tab, groups_tab, blockchain_tab, account_tab}, &mainTab);
+  auto btnSubmit = Button(" Register ", [&] {
+    if (state.regUsername.empty() || state.regPassword.empty()) {
+      state.regStatus = "Username and password required.";
+      return;
+    }
+    try {
+      state.regStatus = "Computing SRP verifier...";
+      std::string saltHex;
+      const auto verifier = SrpSession::computeVerifier(
+          state.regUsername, state.regPassword, saltHex);
+      auto res = api.registerUser(state.regUsername, saltHex, verifier);
+      state.pendingUserId = res.at("user_id").get<int32_t>();
+      if (res.contains("totp_provisioning_uri"))
+        state.regTotpUri = res["totp_provisioning_uri"].get<std::string>();
 
-    auto main_comp = Renderer(
-        Container::Vertical({mainToggle, mainContent}),
-        [&]{
-            return vbox({
-                hbox({
-                    text(" SecureMsg ") | bold | color(Color::Cyan),
-                    text("· "),
-                    text(sessionUser) | bold,
-                    text("  "),
-                    text(std::to_string(store.size()) + " msgs cached") | dim,
-                    filler(),
-                }),
-                separator(),
-                mainToggle->Render(),
-                separator(),
-                mainContent->Render() | flex,
-                separator(),
-                hbox({text("  "),
-                      text(statusMsg) | (statusErr ? color(Color::Red) : color(Color::Green))}),
-            });
+      SrpSession srp;
+      auto init = api.srpInit(state.regUsername);
+      const auto [clientPublic, clientProof] =
+          srp.computeProof(state.regUsername, state.regPassword,
+                           init["srp_salt"], init["server_public"]);
+      auto verify =
+          api.srpVerify(init["session_id"], clientPublic, clientProof);
+      if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
+        state.regStatus = "Server proof invalid.";
+        return;
+      }
+      state.loginPreAuthToken = verify["pre_auth_token"].get<std::string>();
+      state.regStatus = "Registered! Scan the QR code with your authenticator.";
+      state.regShowTotp = true;
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.regStatus = std::string("Error: ") + e.what();
+    }
+  });
+
+  auto btnVerifyTotp = Button(" Verify ", [&] {
+    if (state.regTotpCode.empty()) {
+      state.regTotpStatus = "Enter the 6-digit code.";
+      return;
+    }
+    if (state.regTotpStatus == "Verifying...")
+      return;
+    state.regTotpStatus = "Verifying...";
+    scr.PostEvent(Event::Custom);
+    std::thread([&] {
+      try {
+        std::ofstream log("securemsg.log", std::ios::app);
+        log << "[reg] verify2FA start\n"; log.flush();
+        auto tokens = api.verify2FA(state.loginPreAuthToken, state.regTotpCode);
+        log << "[reg] LocalUser start\n"; log.flush();
+        state.localUser.emplace(state.pendingUserId, state.regUsername,
+                                tokens["access_token"].get<std::string>(),
+                                tokens["refresh_token"].get<std::string>(),
+                                ("identity_" + state.regUsername + ".key"),
+                                state.regPassword);
+        log << "[reg] publishBundle start\n"; log.flush();
+        publishBundle(api, *state.localUser);
+        log << "[reg] MessageStore start\n"; log.flush();
+        // Remove old DB on new registration — old messages used a different key
+        std::filesystem::remove("messages.db");
+        state.messageStore =
+            MessageStore("messages.db", state.localUser->getDbKey());
+        state.regShowTotp = false;
+        state.regTotpUri.clear();
+        state.screen = AppScreen::Main;
+        std::ofstream("securemsg.log", std::ios::app) << "[reg] done\n";
+      } catch (const std::exception &e) {
+        state.regTotpStatus = std::string("Error: ") + e.what();
+        std::ofstream("securemsg.log", std::ios::app)
+            << "[reg] exception: " << e.what() << "\n";
+      }
+      scr.PostEvent(Event::Custom);
+    }).detach();
+  });
+
+  auto btnBack = Button(" Back ", [&] {
+    state.screen = AppScreen::Welcome;
+    state.regStatus.clear();
+    state.regTotpUri.clear();
+    state.regShowTotp = false;
+    scr.PostEvent(Event::Custom);
+  });
+
+  return Renderer(
+      Container::Vertical(
+          {rUser, rPass, tCode, btnSubmit, btnVerifyTotp, btnBack}),
+      [&, rUser, rPass, tCode, btnSubmit, btnVerifyTotp, btnBack] {
+        Elements body = {
+            text(" Register ") | bold | center,
+            separator(),
+            hbox({text(" Username : "),
+                  rUser->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
+            separator(),
+            hbox({text(" Password : "),
+                  rPass->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
+        };
+        if (!state.regShowTotp) {
+          body.push_back(separator());
+          body.push_back(hbox({filler(), btnSubmit->Render(), text("  "),
+                               btnBack->Render(), filler()}));
         }
-    );
+        if (!state.regStatus.empty())
+          body.push_back(paragraph(" " + state.regStatus) |
+                         color(state.regStatus.starts_with("Error")
+                                   ? Color::Red
+                                   : Color::Green));
+        if (state.regShowTotp) {
+          body.push_back(separator());
+          if (!state.regTotpUri.empty())
+            body.push_back(qrElement(state.regTotpUri) | center);
+          body.push_back(separator());
+          body.push_back(hbox({text(" TOTP Code : "),
+                               tCode->Render() | flex |
+                                   size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}));
+          body.push_back(separator());
+          body.push_back(hbox({filler(), btnVerifyTotp->Render(), text("  "),
+                               btnBack->Render(), filler()}));
+          if (!state.regTotpStatus.empty())
+            body.push_back(text(" " + state.regTotpStatus) | color(Color::Red));
+        }
+        return vbox({filler(),
+                     hbox({filler(),
+                           vbox(std::move(body)) | border |
+                               size(WIDTH, GREATER_THAN, DIALOG_MIN_WIDTH),
+                           filler()}),
+                     filler()});
+      });
 
-    // ── Root container ────────────────────────────────────────────────────────
+}
 
-    auto root = Container::Tab({
-        welcome_comp,
-        register_comp,
-        login_comp,
-        totp_comp,
-        passphrase_comp,
-        main_comp
-    }, &scr);
+Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
+                          const ApiClient &api) {
+  auto lUser = Input(&state.loginUsername, "username");
+  lUser |= CatchEvent([&](const Event &) {
+    std::erase(state.loginUsername, '\n');
+    return false;
+  });
+  auto lPass = Input(&state.loginPassword, "password",
+                     InputOption{.transform = {}, .password = true});
+  lPass |= CatchEvent([&](const Event &) {
+    std::erase(state.loginPassword, '\n');
+    return false;
+  });
+  auto tCode = Input(&state.loginTotpCode, "6-digit code");
+  tCode |= CatchEvent([&](const Event &) {
+    std::erase_if(state.loginTotpCode,
+                  [](const char c) { return !std::isdigit(c); });
+    return false;
+  });
 
-    screen.Loop(root);
-    return 0;
+  auto btnLogin = Button(" Login ", [&] {
+    if (state.loginUsername.empty() || state.loginPassword.empty()) {
+      state.loginStatus = "Username and password required.";
+      return;
+    }
+    try {
+      state.loginStatus = "Authenticating...";
+      SrpSession srp;
+      auto init = api.srpInit(state.loginUsername);
+      const auto [clientPublic, clientProof] =
+          srp.computeProof(state.loginUsername, state.loginPassword,
+                           init["srp_salt"], init["server_public"]);
+      auto verify =
+          api.srpVerify(init["session_id"], clientPublic, clientProof);
+      if (!srp.verifyServerProof(verify["server_proof"].get<std::string>())) {
+        state.loginStatus = "ERROR: Server proof invalid -- possible MITM!";
+        return;
+      }
+      state.loginPreAuthToken = verify["pre_auth_token"].get<std::string>();
+      state.loginStatus.clear();
+      state.loginShowTotp = true;
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.loginStatus = std::string("Error: ") + e.what();
+    }
+  });
+
+  auto btnVerify = Button(" Verify ", [&] {
+    if (state.loginTotpCode.empty()) {
+      state.loginTotpStatus = "Enter the 6-digit code.";
+      return;
+    }
+    if (state.loginTotpStatus == "Verifying...")
+      return;
+    state.loginTotpStatus = "Verifying...";
+    scr.PostEvent(Event::Custom);
+    std::thread([&] {
+      try {
+        auto tokens = api.verify2FA(state.loginPreAuthToken, state.loginTotpCode);
+        const std::string keyFile = "identity_" + state.loginUsername + ".key";
+        const bool isNewDevice = !std::filesystem::exists(keyFile);
+        // Decode user_id from JWT sub claim
+        const std::string accessToken = tokens.at("access_token").get<std::string>();
+        const auto dot1 = accessToken.find('.');
+        const auto dot2 = accessToken.find('.', dot1 + 1);
+        std::string payload = accessToken.substr(dot1 + 1, dot2 - dot1 - 1);
+        while (payload.size() % 4) payload += '=';
+        std::ranges::replace(payload, '-', '+');
+        std::ranges::replace(payload, '_', '/');
+        const auto decoded = base64Decode(payload);
+        const auto claims = nlohmann::json::parse(
+            std::string(decoded.begin(), decoded.end()));
+        state.pendingUserId = std::stoi(claims.at("sub").get<std::string>());
+        state.localUser.emplace(state.pendingUserId, state.loginUsername,
+                                tokens["access_token"].get<std::string>(),
+                                tokens["refresh_token"].get<std::string>(),
+                                keyFile, state.loginPassword);
+        if (isNewDevice)
+          publishBundle(api, *state.localUser);
+
+        const auto countRes =
+            api.getPrekeysCount(state.localUser->getAccessToken());
+        if (countRes.at("count").get<int32_t>() < 10) {
+          const auto newOpkPubs =
+              state.localUser->replenishOneTimePrekeys(20U, state.loginPassword);
+          std::vector<std::string> newOpkPubsB64;
+          std::ranges::transform(newOpkPubs, std::back_inserter(newOpkPubsB64),
+                                 [](const auto &p) { return base64Encode(p); });
+          api.uploadPrekeys(state.localUser->getAccessToken(), newOpkPubsB64);
+        }
+
+        state.contactCache = contactCacheLoad("known_identities.json");
+        state.messageStore =
+            MessageStore("messages.db", state.localUser->getDbKey());
+        state.screen = AppScreen::Main;
+      } catch (const std::exception &e) {
+        state.loginTotpStatus = std::string("Error: ") + e.what();
+      }
+      scr.PostEvent(Event::Custom);
+    }).detach();
+  });
+
+  auto btnBack = Button(" Back ", [&] {
+    state.screen = AppScreen::Welcome;
+    state.loginStatus.clear();
+    state.loginShowTotp = false;
+    scr.PostEvent(Event::Custom);
+  });
+
+  return Renderer(
+      Container::Vertical({lUser, lPass, tCode, btnLogin, btnVerify, btnBack}),
+      [&, lUser, lPass, tCode, btnLogin, btnVerify, btnBack] {
+        Elements body = {
+            text(" Login ") | bold | center,
+            separator(),
+            hbox({text(" Username : "),
+                  lUser->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
+            separator(),
+            hbox({text(" Password : "),
+                  lPass->Render() | flex |
+                      size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}),
+        };
+        if (!state.loginShowTotp) {
+          body.push_back(separator());
+          body.push_back(hbox({filler(), btnLogin->Render(), text("  "),
+                               btnBack->Render(), filler()}));
+          if (!state.loginStatus.empty())
+            body.push_back(text(" " + state.loginStatus) | color(Color::Red));
+        } else {
+          body.push_back(separator());
+          body.push_back(hbox({text(" TOTP Code : "),
+                               tCode->Render() | flex |
+                                   size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT)}));
+          body.push_back(separator());
+          body.push_back(hbox({filler(), btnVerify->Render(), text("  "),
+                               btnBack->Render(), filler()}));
+          if (!state.loginTotpStatus.empty())
+            body.push_back(text(" " + state.loginTotpStatus) |
+                           color(Color::Red));
+        }
+        return vbox({filler(),
+                     hbox({filler(),
+                           vbox(std::move(body)) | border |
+                               size(WIDTH, GREATER_THAN, DIALOG_MIN_WIDTH),
+                           filler()}),
+                     filler()});
+      });
+
+}
+
+struct Poller {
+  Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api)
+      : m_thread([&] {
+          static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
+          int contactTick = 5;
+          int spkRotateTick = SPK_ROTATE_INTERVAL;
+
+          std::unique_lock<std::mutex> lock(m_mutex);
+          while (!m_cv.wait_for(lock, std::chrono::seconds(5),
+                                [&] { return m_stop; })) {
+            try {
+              if (!state.localUser)
+                throw std::runtime_error(
+                    "poll thread: localUser unexpectedly absent");
+
+              const auto &lu = *state.localUser;
+              {
+                std::lock_guard<std::mutex> msgLock(state.messageMutex);
+                // Always receive direct messages regardless of selected contact
+                receiveDirectMessages(
+                    api, state.ratchets, *state.messageStore,
+                    lu.getAccessToken(), lu.getKeyBundle().ikX,
+                    lu.getKeyBundle().spk, lu.getKeyBundle().opks,
+                    lu.getKeyBundle().pq, *state.localUser,
+                    state.loginPassword);
+                // Receive group messages for all known groups
+                for (const auto &g : state.groups)
+                  receiveGroupMessages(api, state.groupRatchets,
+                                       *state.messageStore, lu.getAccessToken(),
+                                       g.getId(), lu.getId());
+              }
+
+              // Auto-add any sender we've received a direct message from but
+              // don't have in our contacts list yet
+              for (const int32_t senderId : state.messageStore->getDirectSenderIds()) {
+                if (senderId == lu.getId()) continue;
+                const bool known = std::ranges::any_of(state.contacts,
+                    [senderId](const auto &c) { return c.getId() == senderId; });
+                if (!known) {
+                  try {
+                    const auto res = api.lookupById(lu.getAccessToken(), senderId);
+                    const auto name = res.at("username").get<std::string>();
+                    std::lock_guard<std::mutex> lk(state.stateMutex);
+                    state.contacts.emplace_back(senderId, name, std::vector<uint8_t>{});
+                  } catch (...) {}
+                }
+              }
+
+              state.msgsDirty = true;
+
+              if (--contactTick == 0) {
+                contactTick = 6;
+                auto groupsJson = api.listGroups(lu.getAccessToken());
+
+                if (groupsJson.contains("groups")) {
+                  std::vector<Group> freshGroups;
+
+                  for (const auto &g : groupsJson["groups"]) {
+                    std::vector<int32_t> members;
+
+                    if (g.contains("members")) {
+                      const auto &arr = g["members"];
+                      std::ranges::transform(arr, std::back_inserter(members),
+                                             [](const auto &m) {
+                                               return m.template get<int32_t>();
+                                             });
+                    }
+
+                    const int32_t gid = g.at("id").get<int32_t>();
+                    const int32_t epoch = g.at("epoch").get<int32_t>();
+
+                    // Epoch change means membership changed — re-key the group
+                    if (state.knownGroupEpochs.contains(gid) &&
+                        state.knownGroupEpochs.at(gid) != epoch) {
+                      state.statusMsg =
+                          "⚠ Group " + g.at("name").get<std::string>() +
+                          " membership changed — verify members out-of-band";
+
+                      // Cleanse and drop old sender key so postGroupSenderKey
+                      // re-keys
+                      if (state.groupSenderKeys.contains(gid)) {
+                        auto &sk = state.groupSenderKeys.at(gid);
+                        OPENSSL_cleanse(sk.data(), sk.size());
+                        state.groupSenderKeys.erase(gid);
+                      }
+                      // Drop old group ratchets — they used the old sender key
+                      state.groupRatchets.erase(gid);
+                    }
+                    state.knownGroupEpochs[gid] = epoch;
+                    freshGroups.emplace_back(gid,
+                                             g.at("name").get<std::string>(),
+                                             std::move(members), epoch);
+
+                    // Fetch sender keys from other members first
+                    const auto &kb = lu.getKeyBundle();
+                    fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ikX,
+                                       kb.spk, kb.opks, kb.pq,
+                                       state.groupRatchets, state.skdmTracker);
+
+                    // Only post our sender key if we still don't have one
+                    if (!state.groupSenderKeys.contains(gid)) {
+                      postGroupSenderKey(api, lu.getAccessToken(), gid,
+                                         freshGroups.back().getMembers(),
+                                         kb.ikX, state.groupSenderKeys,
+                                         state.skdmTracker);
+                    }
+                  }
+                  std::lock_guard<std::mutex> groupsLock(state.stateMutex);
+                  state.groups = std::move(freshGroups);
+                }
+              }
+              if (--spkRotateTick == 0 && state.localUser) {
+                spkRotateTick = SPK_ROTATE_INTERVAL;
+                state.localUser->rotateSPK(state.loginPassword);
+                publishBundle(api, *state.localUser);
+              }
+              scr.PostEvent(Event::Custom);
+            } catch (...) {
+            }
+          }
+        }) {}
+
+  ~Poller() {
+    {
+      std::lock_guard lock(m_mutex);
+      m_stop = true;
+    }
+    m_cv.notify_one();
+    if (m_thread.joinable())
+      m_thread.join();
+  }
+
+private:
+  std::thread m_thread;
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  bool m_stop{false};
+};
+
+static void openIdentityOverlay(AppState &state) {
+  const int32_t targetId = state.viewingGroup ? -1 : state.selectedContactId;
+  if (targetId < 0)
+    return;
+  // Search contacts first, fall back to contactCache
+  const auto it = std::ranges::find_if(
+      state.contacts, [&](const auto &c) { return c.getId() == targetId; });
+  if (it == state.contacts.end()) {
+    const auto cit = std::ranges::find_if(
+        state.contactCache, [&](const auto &c) { return c.getId() == targetId; });
+    if (cit == state.contactCache.end()) return;
+    state.overlayTargetName = cit->getUsername();
+    state.overlayKeyB64 = base64Encode(cit->getIdentityPub());
+    state.overlayVerified = cit->isVerified();
+    state.showIdentityOverlay = true;
+    return;
+  }
+  state.overlayTargetName = it->getUsername();
+  state.overlayKeyB64 = base64Encode(it->getIdentityPub());
+  state.overlayVerified = it->isVerified();
+  state.showIdentityOverlay = true;
+}
+
+Component makeMainScreen(AppState &state, ScreenInteractive &scr,
+                         const ApiClient &api) {
+  if (!state.poller)
+    state.poller = std::make_unique<Poller>(state, scr, api);
+
+  auto composeInput = Input(&state.composeText, "Type a message...");
+  composeInput |= CatchEvent([&](const Event &) {
+    std::erase(state.composeText, '\n');
+    return false;
+  });
+
+
+  auto usernameById = [&](const int32_t id) -> std::string {
+    const auto it = std::ranges::find_if(
+        state.contacts, [id](const auto &c) { return c.getId() == id; });
+    if (it != state.contacts.end())
+      return it->getUsername();
+    const auto cit = std::ranges::find_if(
+        state.contactCache, [id](const auto &c) { return c.getId() == id; });
+    if (cit != state.contactCache.end())
+      return cit->getUsername();
+    try {
+      const auto res = api.lookupById(state.localUser->getAccessToken(), id);
+      const auto name = res.at("username").get<std::string>();
+      state.contactCache.emplace_back(id, name, std::vector<uint8_t>{});
+      return name;
+    } catch (...) {
+      return "user:" + std::to_string(id);
+    }
+  };
+
+  auto rebuildMsgLabels = [msgLabels = state.msgLabels, msgIds = state.msgIds,
+                           msgSent = state.msgSent, &state, usernameById] {
+    msgLabels->clear();
+    msgIds->clear();
+    msgSent->clear();
+    if (!state.localUser || !state.messageStore) {
+      std::ofstream("securemsg.log", std::ios::app)
+          << "[rebuild] skipped: localUser=" << static_cast<bool>(state.localUser)
+          << " store=" << static_cast<bool>(state.messageStore) << "\n";
+      return;
+    }
+
+    if (state.viewingGroup && state.selectedGroupId >= 0) {
+      for (const auto &m :
+           state.messageStore->getByGroup(state.selectedGroupId)) {
+        const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
+        const std::string senderName =
+            mine ? state.localUser->getUsername() : usernameById(m.getUserId());
+
+        msgLabels->emplace_back(" " + senderName + ": " + m.getPlaintext());
+        msgIds->emplace_back(m.getId());
+        msgSent->emplace_back(mine);
+      }
+    } else if (!state.viewingGroup && state.selectedContactId >= 0) {
+      const std::string myName = state.localUser->getUsername();
+      const std::string theirName = usernameById(state.selectedContactId);
+      for (const auto &m :
+           state.messageStore->getByUser(state.selectedContactId)) {
+        const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
+        msgLabels->emplace_back(" " + (mine ? myName : theirName) + ": " +
+                             m.getPlaintext());
+        msgIds->emplace_back(m.getId());
+        msgSent->emplace_back(mine);
+      }
+    } else {
+      std::ofstream("securemsg.log", std::ios::app)
+          << "[rebuild] no chat selected: contactId=" << state.selectedContactId
+          << " groupId=" << state.selectedGroupId << "\n";
+      return; // no contact or group selected yet — nothing to show
+    }
+    std::ofstream("securemsg.log", std::ios::app)
+        << "[rebuild] labels=" << msgLabels->size() << "\n";
+    if (state.msgIds->empty()) {
+      state.msgSelected = 0;
+      state.selectedMsgId = -1;
+    } else {
+      state.msgSelected = std::clamp(state.msgSelected, 0,
+                                     static_cast<int>(state.msgIds->size()) - 1);
+      state.selectedMsgId = (*state.msgIds)[state.msgSelected];
+    }
+  };
+
+  auto btnSend = Button(" Send ", [&] {
+    if (state.composeText.empty() || !state.localUser)
+      return;
+
+    // Snapshot UI state needed by the send — avoids holding the mutex
+    // during the blocking HTTP call while keeping ratchet access serialised.
+    const bool isGroup        = state.viewingGroup;
+    const int32_t contactId   = state.selectedContactId;
+    const int32_t groupId     = state.selectedGroupId;
+    const std::string text    = state.composeText;
+    const std::string token   = state.localUser->getAccessToken();
+    const int32_t myId        = state.localUser->getId();
+    const RawKeyPair ikX      = state.localUser->getKeyBundle().ikX;
+    std::vector<Contact> allContacts = state.contacts;
+    for (const auto &c : state.contactCache)
+      if (std::ranges::none_of(allContacts,
+            [&](const auto &e) { return e.getId() == c.getId(); }))
+        allContacts.push_back(c);
+
+    state.composeText.clear();
+    scr.PostEvent(Event::Custom);
+
+    std::thread([&state, &api, &scr, isGroup, contactId, groupId,
+                 text, token, myId, ikX,
+                 allContacts = std::move(allContacts)]() mutable {
+      try {
+        std::lock_guard<std::mutex> msgLock(state.messageMutex);
+        if (!isGroup && contactId >= 0) {
+          sendDirectMessage(api, state.ratchets, *state.messageStore,
+                            token, contactId, text, ikX, allContacts);
+        } else if (isGroup && groupId >= 0) {
+          sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
+                           *state.messageStore, token, groupId, myId, text);
+        } else {
+          throw std::runtime_error("No contact or group selected");
+        }
+      } catch (const std::exception &e) {
+        state.statusMsg = "Send error: " + std::string(e.what());
+        std::ofstream("securemsg.log", std::ios::app)
+            << "[send] error: " << e.what() << "\n";
+      }
+      state.msgsDirty = true;
+      scr.PostEvent(Event::Custom);
+    }).detach();
+  });
+
+  MenuOption msgMenuOpt;
+  msgMenuOpt.on_change = [&state] {
+    if (state.msgSelected >= 0 &&
+        state.msgSelected < static_cast<int>(state.msgIds->size()))
+      state.selectedMsgId = (*state.msgIds)[state.msgSelected];
+  };
+  auto msgMenu = Menu(state.msgLabels.get(), &state.msgSelected, msgMenuOpt);
+
+  auto btnDelete = Button(DELETE_LABEL, [&] {
+    if (!state.localUser || state.selectedMsgId < 0)
+      return;
+
+    try {
+      const bool sent = state.msgSelected >= 0 &&
+                        state.msgSelected < static_cast<int>(state.msgSent->size()) &&
+                        (*state.msgSent)[state.msgSelected];
+      if (sent)
+        api.revokeMessage(state.localUser->getAccessToken(),
+                          state.selectedMsgId);
+
+      if (state.viewingGroup)
+        state.messageStore->removeGroupMessage(state.selectedGroupId,
+                                               state.selectedMsgId);
+      else
+        state.messageStore->removeDirectMessage(state.selectedContactId,
+                                                state.selectedMsgId);
+      state.selectedMsgId = -1;
+      state.msgsDirty = true;
+      state.statusMsg = sent ? "Message revoked." : "Message deleted.";
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.statusMsg = "Delete error: " + std::string(e.what());
+    }
+  });
+
+  state.allLabels->clear();
+
+  // allLabels: contacts first, then groups — no header items (use renderer for headers)
+  auto rebuildLabels = [allLabels = state.allLabels, &state] {
+    std::lock_guard<std::mutex> lock(state.stateMutex);
+    allLabels->clear();
+    std::ranges::transform(
+        state.contacts, std::back_inserter(*allLabels), [&state](const auto &c) {
+          return buildContactLabel(c.getUsername(), c.isVerified(),
+                                   state.creatingGroup,
+                                   state.selectedGroupMembers.contains(c.getId()));
+        });
+    if (!state.creatingGroup)
+      std::ranges::transform(state.groups, std::back_inserter(*allLabels),
+                             [](const auto &g) { return "  " + g.getName(); });
+  };
+  rebuildLabels();
+
+  // Selects contact/group — uses state.menuSelected directly (no dangling aliases)
+  auto selectItem = [&state, &scr, rebuildLabels] {
+    std::ofstream("securemsg.log", std::ios::app)
+        << "[select] menuSelected=" << state.menuSelected
+        << " contacts=" << state.contacts.size() << "\n";
+    std::vector<int32_t> cIds, gIds;
+    std::ranges::transform(state.contacts, std::back_inserter(cIds),
+                           [](const auto &c) { return c.getId(); });
+    std::ranges::transform(state.groups, std::back_inserter(gIds),
+                           [](const auto &g) { return g.getId(); });
+    const auto sel = resolveMenuSelection(cIds, gIds, state.menuSelected);
+    if (state.creatingGroup) {
+      // In group creation mode, Enter toggles membership for contacts
+      if (sel.isContact) {
+        if (state.selectedGroupMembers.contains(sel.id))
+          state.selectedGroupMembers.erase(sel.id);
+        else
+          state.selectedGroupMembers.insert(sel.id);
+        rebuildLabels();
+        scr.PostEvent(Event::Custom);
+      }
+      return;
+    }
+    if (sel.isContact) {
+      state.selectedContactId = sel.id;
+      state.viewingGroup = false;
+    } else if (sel.isGroup) {
+      state.selectedGroupId = sel.id;
+      state.viewingGroup = true;
+    } else {
+      return;
+    }
+    state.msgsDirty = true;
+    scr.PostEvent(Event::Custom);
+  };
+
+  MenuOption menuOpt;
+  menuOpt.on_change = selectItem;
+  menuOpt.on_enter  = selectItem;
+  auto leftMenu = Menu(state.allLabels.get(), &state.menuSelected, menuOpt);
+
+  auto groupNameInput = Input(&state.newGroupName, "group name");
+  groupNameInput |= CatchEvent([&](const Event &) {
+    std::erase(state.newGroupName, '\n');
+    return false;
+  });
+  auto btnCreateGroup = Button(" Create ", [&, rebuildLabels] {
+    if (state.newGroupName.empty() || !state.localUser || !state.messageStore)
+      return;
+    try {
+      // Generate sender key upfront so we always have one, even for solo groups
+      auto senderKey = randomBytes(KEY_BYTES);
+
+      std::ofstream log("securemsg.log", std::ios::app);
+      log << "[createGroup] name=" << state.newGroupName
+          << " members=" << state.selectedGroupMembers.size() << "\n";
+
+      // Encrypt sender key for each initial member and pass to createGroup
+      std::map<int32_t, std::string> initialMembers;
+      for (const int32_t memberId : state.selectedGroupMembers) {
+        log << "[createGroup] encrypting SKDM for member=" << memberId << "\n";
+        initialMembers[memberId] = encryptSkdmForMember(
+            api, state.localUser->getAccessToken(), memberId,
+            state.localUser->getKeyBundle().ikX, senderKey);
+        log << "[createGroup] SKDM ok for member=" << memberId << "\n";
+      }
+
+      log << "[createGroup] calling createGroup API\n";
+      const auto res = api.createGroup(
+          state.localUser->getAccessToken(), state.newGroupName, initialMembers);
+      log << "[createGroup] API response: " << res.dump() << "\n";
+      const int32_t gid = res.at("id").get<int32_t>();
+
+      // Store sender key locally for this group
+      state.groupSenderKeys[gid] = senderKey;
+      OPENSSL_cleanse(senderKey.data(), senderKey.size());
+      log << "[createGroup] done gid=" << gid << "\n";
+      state.newGroupName.clear();
+      state.selectedGroupMembers.clear();
+      state.creatingGroup = false;
+      rebuildLabels();
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      std::ofstream("securemsg.log", std::ios::app)
+          << "[createGroup] FAILED: " << e.what() << "\n";
+      state.statusMsg = std::string("Create group failed: ") + e.what();
+    }
+  });
+  auto btnNewGroup = Button(" + Group ", [&, rebuildLabels] {
+    state.creatingGroup = !state.creatingGroup;
+    if (!state.creatingGroup)
+      state.selectedGroupMembers.clear();
+    rebuildLabels();
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto addInput = Input(&state.addContactUsername, "username");
+  addInput |= CatchEvent([&](const Event &) {
+    std::erase(state.addContactUsername, '\n');
+    return false;
+  });
+  auto btnAdd = Button(" + ", [&, rebuildLabels] {
+    if (state.addContactUsername.empty())
+      return;
+    try {
+      const auto res = api.lookupByUsername(state.localUser->getAccessToken(),
+                                            state.addContactUsername);
+      const int32_t uid = res.at("user_id").get<int32_t>();
+      const auto ikPub = base64Decode(res.at("identity_pub").get<std::string>());
+      if (state.localUser && uid == state.localUser->getId()) {
+        state.statusMsg = "Cannot add yourself as a contact.";
+      } else if (std::ranges::none_of(state.contacts,
+                                      [uid](const auto &c) {
+                                        return c.getId() == uid;
+                                      })) {
+        state.contacts.emplace_back(uid, state.addContactUsername, ikPub);
+      }
+      state.addContactUsername.clear();
+      rebuildLabels();
+      scr.PostEvent(Event::Custom);
+    } catch (const std::exception &e) {
+      state.statusMsg = std::string("Add failed: ") + e.what();
+    }
+  });
+
+  const auto leftPanel = Renderer(
+      Container::Vertical(
+          {groupNameInput, btnCreateGroup, btnNewGroup, addInput, btnAdd, leftMenu}),
+      [&, leftMenu, rebuildLabels, addInput, btnAdd,
+       groupNameInput, btnCreateGroup, btnNewGroup] {
+        rebuildLabels();
+        const int cCount = static_cast<int>(state.contacts.size());
+        const int gCount = static_cast<int>(state.groups.size());
+        Elements left;
+        if (cCount > 0) {
+          left.emplace_back(text(" Contacts ") | bold | center);
+          left.emplace_back(separator());
+        }
+        if (state.allLabels->empty()) {
+          left.emplace_back(text(" No contacts yet ") | dim | center | flex);
+        } else {
+          left.emplace_back(leftMenu->Render() | flex);
+        }
+        if (gCount > 0 && cCount > 0)
+          left.emplace_back(separator());
+        if (gCount > 0)
+          left.emplace_back(text(" Groups ") | bold | center);
+        left.emplace_back(separator());
+        if (state.creatingGroup) {
+          left.emplace_back(text(" New Group ") | bold | center);
+          left.emplace_back(
+              hbox({groupNameInput->Render() | flex |
+                        size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
+                    btnCreateGroup->Render()}));
+          left.emplace_back(text(" Select members (Enter to toggle):") | dim);
+          left.emplace_back(separator());
+        }
+        left.emplace_back(hbox({addInput->Render() | flex |
+                                    size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
+                                btnAdd->Render(), btnNewGroup->Render()}));
+        return vbox(std::move(left)) | border | size(WIDTH, GREATER_THAN, 28);
+      });
+
+  const auto rightPanel = Renderer(
+      Container::Vertical({msgMenu, composeInput, btnSend, btnDelete}),
+      [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels] {
+        if (state.msgsDirty) {
+          rebuildMsgLabels();
+          state.msgsDirty = false;
+        }
+        const bool inChat =
+            state.selectedContactId >= 0 || state.viewingGroup;
+        const Element msgArea =
+            !inChat ? (text(" Select a contact or group to start chatting ") |
+                       dim | center | flex)
+            : state.msgLabels->empty()
+                ? (text(" No messages ") | dim | center | flex)
+                : (msgMenu->Render() | flex | frame);
+        Elements rows{msgArea};
+        if (inChat) {
+          rows.emplace_back(separator());
+          if (state.selectedMsgId >= 0)
+            rows.emplace_back(hbox({composeInput->Render() | flex,
+                                    btnSend->Render(), btnDelete->Render()}));
+          else
+            rows.emplace_back(
+                hbox({composeInput->Render() | flex, btnSend->Render()}));
+        }
+        if (state.viewingGroup && state.selectedGroupId >= 0) {
+          // Show current group members
+          const auto git = std::ranges::find_if(
+              state.groups, [&](const auto &g) {
+                return g.getId() == state.selectedGroupId;
+              });
+          if (git != state.groups.end() && !git->getMembers().empty()) {
+            rows.emplace_back(separator());
+            rows.emplace_back(text(" Members: ") | dim);
+          }
+        }
+        if (!state.statusMsg.empty())
+          rows.emplace_back(text(" " + state.statusMsg) | dim);
+        return vbox(std::move(rows)) | border;
+      });
+
+  auto split = ResizableSplitLeft(leftPanel, rightPanel, &state.splitPos);
+
+  auto btnCloseOverlay = Button(" Close ", [&] {
+    state.showIdentityOverlay = false;
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto btnMarkVerified = Button(" Mark as verified ", [&] {
+    if (state.selectedContactId >= 0) {
+      // Mark in live contacts list
+      const auto it = std::ranges::find_if(
+          state.contacts,
+          [&](const auto &c) { return c.getId() == state.selectedContactId; });
+      if (it != state.contacts.end())
+        it->markVerified();
+      // Also persist in cache
+      const auto cit = std::ranges::find_if(
+          state.contactCache,
+          [&](const auto &c) { return c.getId() == state.selectedContactId; });
+      if (cit != state.contactCache.end())
+        cit->markVerified();
+      contactCacheSave("known_identities.json", state.contactCache);
+    }
+    state.showIdentityOverlay = false;
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto overlayComp = Renderer(
+      Container::Horizontal({btnCloseOverlay, btnMarkVerified}),
+      [&, btnCloseOverlay, btnMarkVerified] {
+        if (!state.showIdentityOverlay)
+          return text("");
+        Elements body = {
+            text(" " + state.overlayTargetName + "'s Identity Key ") | bold |
+                center,
+            separator(),
+            text(" Ed25519 public key (base64): ") | dim,
+            paragraph(" " + state.overlayKeyB64),
+            separator(),
+            text(state.overlayVerified
+                     ? " Verified out-of-band "
+                     : " Not yet verified -- compare with contact directly ") |
+                dim | center,
+            separator(),
+            hbox({filler(), btnCloseOverlay->Render(), text("  "),
+                  btnMarkVerified->Render(), filler()}),
+        };
+        return vbox({filler(),
+                     hbox({filler(),
+                           vbox(std::move(body)) | border |
+                               size(WIDTH, GREATER_THAN, MAIN_PANEL_MIN_WIDTH),
+                           filler()}),
+                     filler()});
+      });
+
+  return CatchEvent(
+      Renderer(Container::Tab({split, overlayComp}, &state.tabIdx),
+               [&, split, overlayComp] {
+                 state.tabIdx = state.showIdentityOverlay ? 1 : 0;
+                 auto base = vbox({
+                     hbox({text(" SecureMsg ") | bold, filler(),
+                           state.localUser
+                               ? (text(" [My Key: " +
+                                       base64Encode(
+                                           state.localUser->getKeyBundle().ik.pub)
+                                       + "] ") |
+                                  dim)
+                               : text(""),
+                           text(" [Ctrl+K] identity  [Ctrl+Q] quit ") | dim}) |
+                         bgcolor(Color::Blue),
+                     split->Render() | flex,
+                 });
+                 if (!state.showIdentityOverlay)
+                   return base;
+                 return dbox({base, overlayComp->Render()});
+               }),
+      [&](const Event &e) {
+        if (e == Event::Special("\x0b")) { // Ctrl+K — open identity overlay
+          openIdentityOverlay(state);
+          scr.PostEvent(Event::Custom);
+          return true;
+        }
+        if (e == Event::Special("\x11")) { // Ctrl+Q
+          state.poller.reset();
+          scr.ExitLoopClosure()();
+          return true;
+        }
+        return false;
+      });
+}
+
+int main() {
+  auto scr = ScreenInteractive::Fullscreen();
+  const ApiClient api("https://BobbyTables.theburkenator.com");
+  AppState state;
+
+  int screenIdx = 0;
+
+  auto welcome = makeWelcomeScreen(state, scr);
+  auto reg = makeRegisterScreen(state, scr, api);
+  auto login = makeLoginScreen(state, scr, api);
+  auto mainScr = makeMainScreen(state, scr, api);
+
+  const std::array screens{welcome, reg, login, mainScr};
+  const auto root = CatchEvent(
+      Renderer(Container::Tab({welcome, reg, login, mainScr}, &screenIdx),
+               [&, screens] {
+                 screenIdx = static_cast<int>(state.screen);
+                 return screens.at(screenIdx)->Render();
+               }),
+      [](const Event &) { return false; });
+
+  scr.Loop(root);
+  return 0;
 }

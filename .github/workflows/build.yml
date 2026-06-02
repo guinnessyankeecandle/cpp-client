@@ -1,0 +1,45 @@
+name: Build
+
+on:
+  push:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang git openssl curl nlohmann-json qrencode botan
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -Wno-dev
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+  checksec:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm cmake ninja clang git openssl curl nlohmann-json qrencode botan checksec
+      - name: Build hardened Release binary
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE" \
+            -DCMAKE_EXE_LINKER_FLAGS="-pie -Wl,-z,relro,-z,now"
+          cmake --build build --target securemsg
+      - name: Run checksec
+        run: checksec file build/securemsg

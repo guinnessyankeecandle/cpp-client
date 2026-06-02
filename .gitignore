@@ -1,7 +1,29 @@
+# Build directories
 build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+_deps/
+securemsg.log
+messages.db
+
+# Compiled artifacts
 *.o
 *.a
-identity.key
+*.so
+*.so.*
+
+# CLion Flatpak toolchain helpers (environment-specific)
+cmake/
+
+# IDE / editor
+.idea/
+*.iml
+.vscode/
+.clangd/
+
+# Runtime artifacts
+identity*.key
 docs/
-.idea
-cmake-build-debug
