@@ -10,10 +10,21 @@ find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(SqliteOrm QUIET)
 
-find_package(nlohmann_json REQUIRED PATHS
+find_package(nlohmann_json QUIET PATHS
     /usr/share/cmake/nlohmann_json
     /run/host/usr/share/cmake/nlohmann_json
     NO_DEFAULT_PATH)
+if(NOT nlohmann_json_FOUND)
+    find_package(nlohmann_json QUIET)
+endif()
+if(NOT nlohmann_json_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3)
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
 # ftxui requires Threads; pre-satisfy it for CLion's Flatpak cmake
 if(NOT TARGET Threads::Threads)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
@@ -23,14 +34,35 @@ if(NOT TARGET Threads::Threads)
     add_library(Threads::Threads INTERFACE IMPORTED)
     target_link_options(Threads::Threads INTERFACE -lpthread)
 endif()
-find_package(ftxui REQUIRED PATHS
+find_package(ftxui QUIET PATHS
     /usr/lib64/cmake/ftxui
     /run/host/usr/lib64/cmake/ftxui
     NO_DEFAULT_PATH)
-find_package(Catch2 REQUIRED PATHS
+if(NOT ftxui_FOUND)
+    find_package(ftxui QUIET)
+endif()
+if(NOT ftxui_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(ftxui
+        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
+        GIT_TAG        v5.0.0)
+    FetchContent_MakeAvailable(ftxui)
+endif()
+
+find_package(Catch2 QUIET PATHS
     /usr/lib64/cmake/Catch2
     /run/host/usr/lib64/cmake/Catch2
     NO_DEFAULT_PATH)
+if(NOT Catch2_FOUND)
+    find_package(Catch2 QUIET)
+endif()
+if(NOT Catch2_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG        v2.13.10)
+    FetchContent_MakeAvailable(Catch2)
+endif()
 
 # ── Crypto ────────────────────────────────────────────────────────────────────
 add_library(securemsg_crypto)

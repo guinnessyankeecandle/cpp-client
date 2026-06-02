@@ -124,8 +124,14 @@ private:
     struct SrpConsts { PyPtr srp, sha256, ng4096; };
 
     static SrpConsts srpConstants() {
-        if (!Py_IsInitialized())
+        if (!Py_IsInitialized()) {
             Py_Initialize();
+            // Match the server: srp_session.py calls srp.rfc5054_enable() at module load
+            const PyPtr srp_init(PyImport_ImportModule("srp"));
+            if (srp_init)
+                PyObject_CallMethod(srp_init.get(), "rfc5054_enable", nullptr);
+            PyErr_Clear();
+        }
 
         PyPtr srp(PyImport_ImportModule("srp"));
         if (!srp) { PyErr_Print(); throw std::runtime_error("SRP: cannot import pysrp"); }

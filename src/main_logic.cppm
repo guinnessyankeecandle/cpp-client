@@ -33,3 +33,13 @@ export inline std::string buildMessageLabel(const std::string &senderName,
                                             const std::string &plaintext) {
   return " " + senderName + ": " + plaintext;
 }
+
+// Builds the menu label for a contact, optionally with a group-creation checkbox.
+export inline std::string buildContactLabel(const std::string &username,
+                                            const bool verified,
+                                            const bool creatingGroup,
+                                            const bool selected) {
+  if (creatingGroup)
+    return std::string(selected ? "[x] " : "[ ] ") + username;
+  return std::string(verified ? "✓ " : "  ") + username;
+}

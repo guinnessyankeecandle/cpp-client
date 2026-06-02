@@ -130,6 +130,11 @@ public:
     return result;
   }
 
+  [[nodiscard]] std::vector<int32_t> getDirectSenderIds() const {
+    auto rows = m_storage->select(distinct(&DirectRow::userId));
+    return {rows.begin(), rows.end()};
+  }
+
   void removeDirectMessage(const int32_t userId, const int32_t id) const {
     m_storage->remove_all<DirectRow>(
         where(c(&DirectRow::id) == id and c(&DirectRow::userId) == userId));

@@ -67,3 +67,23 @@ TEST_CASE("buildMessageLabel formats correctly", "[main_logic]") {
   REQUIRE(buildMessageLabel("alice", "hello") == " alice: hello");
   REQUIRE(buildMessageLabel("You", "test") == " You: test");
 }
+
+TEST_CASE("buildContactLabel normal mode uses verified marker", "[main_logic]") {
+  REQUIRE(buildContactLabel("alice", true,  false, false) == "✓ alice");
+  REQUIRE(buildContactLabel("bob",   false, false, false) == "  bob");
+}
+
+TEST_CASE("buildContactLabel group creation mode shows checkbox", "[main_logic]") {
+  REQUIRE(buildContactLabel("alice", true,  true, false) == "[ ] alice");
+  REQUIRE(buildContactLabel("alice", true,  true, true)  == "[x] alice");
+  REQUIRE(buildContactLabel("bob",   false, true, false) == "[ ] bob");
+  REQUIRE(buildContactLabel("bob",   false, true, true)  == "[x] bob");
+}
+
+TEST_CASE("buildContactLabel verified flag ignored in group creation mode", "[main_logic]") {
+  // verification status should not affect the label when creating a group
+  REQUIRE(buildContactLabel("carol", true,  true, true) ==
+          buildContactLabel("carol", false, true, true));
+  REQUIRE(buildContactLabel("dave",  true,  true, false) ==
+          buildContactLabel("dave",  false, true, false));
+}

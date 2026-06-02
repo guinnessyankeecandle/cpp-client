@@ -73,7 +73,8 @@ struct AppState {
   bool overlayVerified{false};
 
   std::unique_ptr<struct Poller> poller;
-  std::mutex stateMutex; // guards Poller→UI writes: contacts (usernameById) and groups
+  std::mutex stateMutex;   // guards Poller→UI writes: contacts and groups
+  std::mutex messageMutex; // guards ratchets, groupRatchets, messageStore
 
   // Shared UI state for contact/group menu (must outlive makeMainScreen)
   std::shared_ptr<std::vector<std::string>> allLabels =
@@ -487,18 +488,38 @@ struct Poller {
                     "poll thread: localUser unexpectedly absent");
 
               const auto &lu = *state.localUser;
-              if (state.selectedContactId >= 0 && !state.viewingGroup) {
+              {
+                std::lock_guard<std::mutex> msgLock(state.messageMutex);
+                // Always receive direct messages regardless of selected contact
                 receiveDirectMessages(
                     api, state.ratchets, *state.messageStore,
                     lu.getAccessToken(), lu.getKeyBundle().ikX,
                     lu.getKeyBundle().spk, lu.getKeyBundle().opks,
                     lu.getKeyBundle().pq, *state.localUser,
                     state.loginPassword);
-              } else if (state.viewingGroup && state.selectedGroupId >= 0) {
-                receiveGroupMessages(api, state.groupRatchets,
-                                     *state.messageStore, lu.getAccessToken(),
-                                     state.selectedGroupId, lu.getId());
+                // Receive group messages for all known groups
+                for (const auto &g : state.groups)
+                  receiveGroupMessages(api, state.groupRatchets,
+                                       *state.messageStore, lu.getAccessToken(),
+                                       g.getId(), lu.getId());
               }
+
+              // Auto-add any sender we've received a direct message from but
+              // don't have in our contacts list yet
+              for (const int32_t senderId : state.messageStore->getDirectSenderIds()) {
+                if (senderId == lu.getId()) continue;
+                const bool known = std::ranges::any_of(state.contacts,
+                    [senderId](const auto &c) { return c.getId() == senderId; });
+                if (!known) {
+                  try {
+                    const auto res = api.lookupById(lu.getAccessToken(), senderId);
+                    const auto name = res.at("username").get<std::string>();
+                    std::lock_guard<std::mutex> lk(state.stateMutex);
+                    state.contacts.emplace_back(senderId, name, std::vector<uint8_t>{});
+                  } catch (...) {}
+                }
+              }
+
               state.msgsDirty = true;
 
               if (--contactTick == 0) {
@@ -630,13 +651,17 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         state.contacts, [id](const auto &c) { return c.getId() == id; });
     if (it != state.contacts.end())
       return it->getUsername();
+    const auto cit = std::ranges::find_if(
+        state.contactCache, [id](const auto &c) { return c.getId() == id; });
+    if (cit != state.contactCache.end())
+      return cit->getUsername();
     try {
       const auto res = api.lookupById(state.localUser->getAccessToken(), id);
-      auto name = res.at("username").get<std::string>();
-      state.contacts.emplace_back(id, name, std::vector<uint8_t>{});
+      const auto name = res.at("username").get<std::string>();
+      state.contactCache.emplace_back(id, name, std::vector<uint8_t>{});
       return name;
     } catch (...) {
-      return "?";
+      return "user:" + std::to_string(id);
     }
   };
 
@@ -682,55 +707,60 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     }
     std::ofstream("securemsg.log", std::ios::app)
         << "[rebuild] labels=" << msgLabels->size() << "\n";
-    if (state.msgSelected >= static_cast<int>(state.msgIds->size()))
-      state.msgSelected = std::max(0, static_cast<int>(state.msgIds->size()) - 1);
-    state.selectedMsgId =
-        state.msgIds->empty() ? -1 : (*state.msgIds)[state.msgSelected];
+    if (state.msgIds->empty()) {
+      state.msgSelected = 0;
+      state.selectedMsgId = -1;
+    } else {
+      state.msgSelected = std::clamp(state.msgSelected, 0,
+                                     static_cast<int>(state.msgIds->size()) - 1);
+      state.selectedMsgId = (*state.msgIds)[state.msgSelected];
+    }
   };
 
   auto btnSend = Button(" Send ", [&] {
-    if (state.composeText.empty())
+    if (state.composeText.empty() || !state.localUser)
       return;
 
-    try {
-      if (!state.localUser)
-        return;
+    // Snapshot UI state needed by the send — avoids holding the mutex
+    // during the blocking HTTP call while keeping ratchet access serialised.
+    const bool isGroup        = state.viewingGroup;
+    const int32_t contactId   = state.selectedContactId;
+    const int32_t groupId     = state.selectedGroupId;
+    const std::string text    = state.composeText;
+    const std::string token   = state.localUser->getAccessToken();
+    const int32_t myId        = state.localUser->getId();
+    const RawKeyPair ikX      = state.localUser->getKeyBundle().ikX;
+    std::vector<Contact> allContacts = state.contacts;
+    for (const auto &c : state.contactCache)
+      if (std::ranges::none_of(allContacts,
+            [&](const auto &e) { return e.getId() == c.getId(); }))
+        allContacts.push_back(c);
 
-      if (!state.viewingGroup && state.selectedContactId >= 0) {
-        // Merge contacts and contactCache for key lookup
-        std::vector<Contact> allContacts = state.contacts;
-        for (const auto &c : state.contactCache)
-          if (std::ranges::none_of(allContacts, [&](const auto &e) {
-                return e.getId() == c.getId();
-              }))
-            allContacts.push_back(c);
-        sendDirectMessage(api, state.ratchets, *state.messageStore,
-                          state.localUser->getAccessToken(),
-                          state.selectedContactId, state.composeText,
-                          state.localUser->getKeyBundle().ikX,
-                          allContacts);
+    state.composeText.clear();
+    scr.PostEvent(Event::Custom);
 
-      } else if (state.viewingGroup && state.selectedGroupId >= 0) {
-        sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
-                         *state.messageStore, state.localUser->getAccessToken(),
-                         state.selectedGroupId, state.localUser->getId(),
-                         state.composeText);
-
-      } else {
-        throw std::runtime_error("No contact or group selected");
+    std::thread([&state, &api, &scr, isGroup, contactId, groupId,
+                 text, token, myId, ikX,
+                 allContacts = std::move(allContacts)]() mutable {
+      try {
+        std::lock_guard<std::mutex> msgLock(state.messageMutex);
+        if (!isGroup && contactId >= 0) {
+          sendDirectMessage(api, state.ratchets, *state.messageStore,
+                            token, contactId, text, ikX, allContacts);
+        } else if (isGroup && groupId >= 0) {
+          sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
+                           *state.messageStore, token, groupId, myId, text);
+        } else {
+          throw std::runtime_error("No contact or group selected");
+        }
+      } catch (const std::exception &e) {
+        state.statusMsg = "Send error: " + std::string(e.what());
+        std::ofstream("securemsg.log", std::ios::app)
+            << "[send] error: " << e.what() << "\n";
       }
-
-      state.composeText.clear();
       state.msgsDirty = true;
       scr.PostEvent(Event::Custom);
-
-    } catch (const std::exception &e) {
-      state.statusMsg = "Send error: " + std::string(e.what());
-      std::ofstream("securemsg.log", std::ios::app)
-          << "[send] error: " << e.what() << "\n";
-      state.msgsDirty = true;
-      scr.PostEvent(Event::Custom);
-    }
+    }).detach();
   });
 
   MenuOption msgMenuOpt;
@@ -775,16 +805,19 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     std::lock_guard<std::mutex> lock(state.stateMutex);
     allLabels->clear();
     std::ranges::transform(
-        state.contacts, std::back_inserter(*allLabels), [](const auto &c) {
-          return std::string(c.isVerified() ? "✓ " : "  ") + c.getUsername();
+        state.contacts, std::back_inserter(*allLabels), [&state](const auto &c) {
+          return buildContactLabel(c.getUsername(), c.isVerified(),
+                                   state.creatingGroup,
+                                   state.selectedGroupMembers.contains(c.getId()));
         });
-    std::ranges::transform(state.groups, std::back_inserter(*allLabels),
-                           [](const auto &g) { return "  " + g.getName(); });
+    if (!state.creatingGroup)
+      std::ranges::transform(state.groups, std::back_inserter(*allLabels),
+                             [](const auto &g) { return "  " + g.getName(); });
   };
   rebuildLabels();
 
   // Selects contact/group — uses state.menuSelected directly (no dangling aliases)
-  auto selectItem = [&state, &scr] {
+  auto selectItem = [&state, &scr, rebuildLabels] {
     std::ofstream("securemsg.log", std::ios::app)
         << "[select] menuSelected=" << state.menuSelected
         << " contacts=" << state.contacts.size() << "\n";
@@ -801,6 +834,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           state.selectedGroupMembers.erase(sel.id);
         else
           state.selectedGroupMembers.insert(sel.id);
+        rebuildLabels();
         scr.PostEvent(Event::Custom);
       }
       return;
@@ -832,28 +866,49 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     if (state.newGroupName.empty() || !state.localUser || !state.messageStore)
       return;
     try {
-      const auto res = api.createGroup(
-          state.localUser->getAccessToken(), state.newGroupName, {});
-      const int32_t gid = res.at("group_id").get<int32_t>();
-      // Post sender key for selected members so they can receive messages
-      if (!state.selectedGroupMembers.empty()) {
-        const std::vector<int32_t> memberIds(state.selectedGroupMembers.begin(),
-                                             state.selectedGroupMembers.end());
-        postGroupSenderKey(api, state.localUser->getAccessToken(), gid,
-                           memberIds, state.localUser->getKeyBundle().ikX,
-                           state.groupSenderKeys, state.skdmTracker);
+      // Generate sender key upfront so we always have one, even for solo groups
+      auto senderKey = randomBytes(KEY_BYTES);
+
+      std::ofstream log("securemsg.log", std::ios::app);
+      log << "[createGroup] name=" << state.newGroupName
+          << " members=" << state.selectedGroupMembers.size() << "\n";
+
+      // Encrypt sender key for each initial member and pass to createGroup
+      std::map<int32_t, std::string> initialMembers;
+      for (const int32_t memberId : state.selectedGroupMembers) {
+        log << "[createGroup] encrypting SKDM for member=" << memberId << "\n";
+        initialMembers[memberId] = encryptSkdmForMember(
+            api, state.localUser->getAccessToken(), memberId,
+            state.localUser->getKeyBundle().ikX, senderKey);
+        log << "[createGroup] SKDM ok for member=" << memberId << "\n";
       }
+
+      log << "[createGroup] calling createGroup API\n";
+      const auto res = api.createGroup(
+          state.localUser->getAccessToken(), state.newGroupName, initialMembers);
+      log << "[createGroup] API response: " << res.dump() << "\n";
+      const int32_t gid = res.at("id").get<int32_t>();
+
+      // Store sender key locally for this group
+      state.groupSenderKeys[gid] = senderKey;
+      OPENSSL_cleanse(senderKey.data(), senderKey.size());
+      log << "[createGroup] done gid=" << gid << "\n";
       state.newGroupName.clear();
       state.selectedGroupMembers.clear();
       state.creatingGroup = false;
       rebuildLabels();
       scr.PostEvent(Event::Custom);
     } catch (const std::exception &e) {
+      std::ofstream("securemsg.log", std::ios::app)
+          << "[createGroup] FAILED: " << e.what() << "\n";
       state.statusMsg = std::string("Create group failed: ") + e.what();
     }
   });
-  auto btnNewGroup = Button(" + Group ", [&] {
+  auto btnNewGroup = Button(" + Group ", [&, rebuildLabels] {
     state.creatingGroup = !state.creatingGroup;
+    if (!state.creatingGroup)
+      state.selectedGroupMembers.clear();
+    rebuildLabels();
     scr.PostEvent(Event::Custom);
   });
 
@@ -915,12 +970,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
               hbox({groupNameInput->Render() | flex |
                         size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
                     btnCreateGroup->Render()}));
-          left.emplace_back(text(" Select members:") | dim);
-          for (const auto &c : state.contacts) {
-            const bool sel = state.selectedGroupMembers.contains(c.getId());
-            left.emplace_back(
-                text(std::string(sel ? " [x] " : " [ ] ") + c.getUsername()));
-          }
+          left.emplace_back(text(" Select members (Enter to toggle):") | dim);
           left.emplace_back(separator());
         }
         left.emplace_back(hbox({addInput->Render() | flex |
