@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(OPENSSL_ROOT_DIR /usr/local/openssl-3.5)
+set(OPENSSL_USE_STATIC_LIBS FALSE)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
@@ -14,12 +16,17 @@ if(TARGET SQLite::SQLite3 AND NOT TARGET SQLite3::SQLite3)
 elseif(TARGET SQLite3::SQLite3 AND NOT TARGET SQLite::SQLite3)
     add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
 endif()
-find_package(SqliteOrm QUIET)
+find_package(SqliteOrm QUIET PATHS
+    ${CMAKE_BINARY_DIR}
+    /run/host/usr/share/cmake)
 if(NOT TARGET sqlite_orm::sqlite_orm)
     include(FetchContent)
     FetchContent_Declare(sqlite_orm
         GIT_REPOSITORY https://github.com/fnc12/sqlite_orm.git
         GIT_TAG        v1.8.2)
+    # sqlite_orm's bundled ucm.cmake uses cmake_minimum_required < 3.5,
+    # which CMake 4.x no longer accepts — suppress with the recommended policy var
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(sqlite_orm)
 endif()
 
@@ -77,6 +84,24 @@ if(NOT Catch2_FOUND)
     FetchContent_MakeAvailable(Catch2)
 endif()
 
+# ── Python (for pysrp embedding) ─────────────────────────────────────────────
+find_program(Python3_EXECUTABLE NAMES python3)
+if(NOT Python3_EXECUTABLE)
+    message(FATAL_ERROR "python3 not found — required for SRP via pysrp")
+endif()
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+        "import sysconfig; print(sysconfig.get_path('include'))"
+    OUTPUT_VARIABLE _py_inc OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 10)
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+        "import sysconfig; d=sysconfig.get_config_var; print(d('LIBDIR') + '/' + d('LDLIBRARY'))"
+    OUTPUT_VARIABLE _py_lib OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 10)
+# Also add Flatpak host paths so CLion's bundled CMake indexer finds Python.h
+list(APPEND _py_inc_dirs "${_py_inc}")
+string(REPLACE "/usr/" "/run/host/usr/" _py_inc_host "${_py_inc}")
+list(APPEND _py_inc_dirs "${_py_inc_host}")
+
 # ── Crypto ────────────────────────────────────────────────────────────────────
 add_library(securemsg_crypto)
 target_sources(securemsg_crypto PUBLIC
@@ -92,11 +117,8 @@ target_sources(securemsg_crypto PUBLIC
         src/crypto/keystore.cppm
         src/crypto/srp.cppm
         src/crypto/crypto.cppm)
-target_include_directories(securemsg_crypto PUBLIC
-    /usr/include/python3.14
-    /run/host/usr/include/python3.14)
-target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto
-    /usr/lib64/libpython3.14.so)
+target_include_directories(securemsg_crypto PUBLIC ${_py_inc_dirs})
+target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto "${_py_lib}")
 target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -130,6 +152,12 @@ target_sources(securemsg_messaging PUBLIC
         src/messaging/send_receive.cppm
         src/messaging/messaging.cppm)
 target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm)
+# Resolve sqlite_orm include dir at configure time so clang-scan-deps sees it during module scanning.
+# Generator expressions are not expanded for the module scan command, so we must use a concrete path.
+get_target_property(_sqlite_orm_inc sqlite_orm::sqlite_orm INTERFACE_INCLUDE_DIRECTORIES)
+if(_sqlite_orm_inc)
+    target_include_directories(securemsg_messaging PUBLIC ${_sqlite_orm_inc})
+endif()
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
 # ── Main logic (pure, testable) ───────────────────────────────────────────────
@@ -138,11 +166,17 @@ target_sources(securemsg_main_logic PUBLIC
     FILE_SET CXX_MODULES FILES src/main_logic.cppm)
 target_compile_options(securemsg_main_logic PRIVATE -Wall -Wextra)
 
+# ── Blockchain manager ────────────────────────────────────────────────────────
+add_library(securemsg_blockchain STATIC src/BlockchainManager.cpp)
+target_include_directories(securemsg_blockchain PUBLIC src)
+target_link_libraries(securemsg_blockchain PUBLIC nlohmann_json::nlohmann_json CURL::libcurl)
+
 # ── Main binary ───────────────────────────────────────────────────────────────
 add_executable(securemsg src/main.cpp)
 target_link_libraries(securemsg PRIVATE
     securemsg_models securemsg_crypto securemsg_network securemsg_messaging
-    securemsg_main_logic ftxui::screen ftxui::dom ftxui::component)
+    securemsg_main_logic securemsg_blockchain
+    ftxui::screen ftxui::dom ftxui::component)
 target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

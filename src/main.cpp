@@ -6,6 +6,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "BlockchainManager.hpp"
 import securemsg.models;
 import securemsg.crypto;
 import securemsg.messaging;
@@ -72,6 +74,15 @@ struct AppState {
   std::string overlayKeyB64;
   bool overlayVerified{false};
 
+  // Blockchain
+  bool showBlockchainOverlay{false};
+  std::string chainStatus;
+  std::string chainVerifyInput;
+  std::string chainVerifyResult;
+  std::vector<MessageEnvelope> chainLastEnvs;
+  SegmentDigest chainDigest;
+  int chainSegIdx{0};
+
   std::unique_ptr<struct Poller> poller;
   std::mutex stateMutex;   // guards Poller→UI writes: contacts and groups
   std::mutex messageMutex; // guards ratchets, groupRatchets, messageStore
@@ -90,6 +101,8 @@ struct AppState {
   std::string newGroupName;                    // input for new group name
   bool creatingGroup{false};                   // whether group creation mode is active
   std::set<int32_t> selectedGroupMembers;      // contacts selected for new group
+  std::string addGroupMemberUsername;          // input for adding member to existing group
+  int32_t selectedMemberIndex{-1};             // index of member selected for removal
   int menuSelected{0};  // selected index in contacts/groups menu
   int msgSelected{0};   // selected index in message list
   int splitPos{32};     // resizable split position
@@ -476,7 +489,6 @@ struct Poller {
   Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api)
       : m_thread([&] {
           static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
-          int contactTick = 5;
           int spkRotateTick = SPK_ROTATE_INTERVAL;
 
           std::unique_lock<std::mutex> lock(m_mutex);
@@ -497,11 +509,16 @@ struct Poller {
                     lu.getKeyBundle().spk, lu.getKeyBundle().opks,
                     lu.getKeyBundle().pq, *state.localUser,
                     state.loginPassword);
-                // Receive group messages for all known groups
-                for (const auto &g : state.groups)
+                // Fetch SKDMs and receive messages for all known groups every poll
+                const auto &kb = lu.getKeyBundle();
+                for (const auto &g : state.groups) {
+                  fetchAndApplySkdms(api, lu.getAccessToken(), g.getId(),
+                                     kb.ikX, kb.spk, kb.opks, kb.pq,
+                                     state.groupRatchets, state.skdmTracker);
                   receiveGroupMessages(api, state.groupRatchets,
                                        *state.messageStore, lu.getAccessToken(),
                                        g.getId(), lu.getId());
+                }
               }
 
               // Auto-add any sender we've received a direct message from but
@@ -525,8 +542,8 @@ struct Poller {
 
               state.msgsDirty = true;
 
-              if (--contactTick == 0) {
-                contactTick = 6;
+              // Poll groups every tick (same cadence as direct messages)
+              {
                 auto groupsJson = api.listGroups(lu.getAccessToken());
 
                 if (groupsJson.contains("groups")) {
@@ -553,14 +570,11 @@ struct Poller {
                           "⚠ Group " + g.at("name").get<std::string>() +
                           " membership changed — verify members out-of-band";
 
-                      // Cleanse and drop old sender key so postGroupSenderKey
-                      // re-keys
                       if (state.groupSenderKeys.contains(gid)) {
                         auto &sk = state.groupSenderKeys.at(gid);
                         OPENSSL_cleanse(sk.data(), sk.size());
                         state.groupSenderKeys.erase(gid);
                       }
-                      // Drop old group ratchets — they used the old sender key
                       state.groupRatchets.erase(gid);
                     }
                     state.knownGroupEpochs[gid] = epoch;
@@ -568,14 +582,29 @@ struct Poller {
                                              g.at("name").get<std::string>(),
                                              std::move(members), epoch);
 
-                    // Fetch sender keys from other members first
-                    const auto &kb = lu.getKeyBundle();
-                    fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ikX,
-                                       kb.spk, kb.opks, kb.pq,
-                                       state.groupRatchets, state.skdmTracker);
+                    // Pre-cache usernames for all members so the renderer
+                    // never needs to make API calls on the UI thread
+                    for (const int32_t mid : freshGroups.back().getMembers()) {
+                      if (mid == lu.getId()) continue;
+                      const bool cached = std::ranges::any_of(state.contacts,
+                          [mid](const auto &c) { return c.getId() == mid; }) ||
+                          std::ranges::any_of(state.contactCache,
+                          [mid](const auto &c) { return c.getId() == mid; });
+                      if (!cached) {
+                        try {
+                          const auto r = api.lookupById(lu.getAccessToken(), mid);
+                          const auto name = r.at("username").get<std::string>();
+                          const auto ikRes = api.lookupByUsername(lu.getAccessToken(), name);
+                          const auto ikPub = base64Decode(ikRes.at("identity_pub").get<std::string>());
+                          std::lock_guard<std::mutex> lk(state.stateMutex);
+                          state.contactCache.emplace_back(mid, name, ikPub);
+                        } catch (...) {}
+                      }
+                    }
 
                     // Only post our sender key if we still don't have one
                     if (!state.groupSenderKeys.contains(gid)) {
+                      const auto &kb = lu.getKeyBundle();
                       postGroupSenderKey(api, lu.getAccessToken(), gid,
                                          freshGroups.back().getMembers(),
                                          kb.ikX, state.groupSenderKeys,
@@ -649,6 +678,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   });
 
 
+  // Cache-only lookup — never makes API calls (poller pre-populates the cache)
   auto usernameById = [&](const int32_t id) -> std::string {
     const auto it = std::ranges::find_if(
         state.contacts, [id](const auto &c) { return c.getId() == id; });
@@ -658,16 +688,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         state.contactCache, [id](const auto &c) { return c.getId() == id; });
     if (cit != state.contactCache.end())
       return cit->getUsername();
-    try {
-      const auto res   = api.lookupById(state.localUser->getAccessToken(), id);
-      const auto name  = res.at("username").get<std::string>();
-      const auto ikRes = api.lookupByUsername(state.localUser->getAccessToken(), name);
-      const auto ikPub = base64Decode(ikRes.at("identity_pub").get<std::string>());
-      state.contactCache.emplace_back(id, name, ikPub);
-      return name;
-    } catch (...) {
-      return "user:" + std::to_string(id);
-    }
+    return "user:" + std::to_string(id);
   };
 
   auto rebuildMsgLabels = [msgLabels = state.msgLabels, msgIds = state.msgIds,
@@ -801,6 +822,81 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     } catch (const std::exception &e) {
       state.statusMsg = "Delete error: " + std::string(e.what());
     }
+  });
+
+  auto addMemberInput = Input(&state.addGroupMemberUsername, "add member...");
+  addMemberInput |= CatchEvent([&](const Event &) {
+    std::erase(state.addGroupMemberUsername, '\n');
+    return false;
+  });
+
+  auto btnAddMember = Button(" + ", [&] {
+    if (!state.localUser || state.selectedGroupId < 0 ||
+        state.addGroupMemberUsername.empty())
+      return;
+    std::thread([&] {
+      try {
+        const auto res = api.lookupByUsername(
+            state.localUser->getAccessToken(), state.addGroupMemberUsername);
+        const int32_t uid = res.at("user_id").get<int32_t>();
+        const auto senderKey = state.groupSenderKeys.at(state.selectedGroupId);
+        const auto skdm = encryptSkdmForMember(
+            api, state.localUser->getAccessToken(), uid,
+            state.localUser->getKeyBundle().ikX, senderKey);
+        api.addGroupMember(state.localUser->getAccessToken(),
+                           state.selectedGroupId, uid, skdm);
+        state.addGroupMemberUsername.clear();
+        state.statusMsg = "Member added.";
+      } catch (const std::exception &e) {
+        state.statusMsg = std::string("Add member failed: ") + e.what();
+      }
+      state.msgsDirty = true;
+      scr.PostEvent(Event::Custom);
+    }).detach();
+  });
+
+  auto btnRemoveMember = Button(" Remove ", [&] {
+    if (!state.localUser || state.selectedGroupId < 0 ||
+        state.selectedMemberIndex < 0)
+      return;
+    const auto git = std::ranges::find_if(
+        state.groups,
+        [&](const auto &g) { return g.getId() == state.selectedGroupId; });
+    if (git == state.groups.end() ||
+        state.selectedMemberIndex >= static_cast<int>(git->getMembers().size()))
+      return;
+    const int32_t targetId = git->getMembers()[state.selectedMemberIndex];
+    std::thread([&, targetId] {
+      try {
+        // Build fresh SKDMs for all remaining members if we're the creator
+        const auto &members = [&] {
+          const auto g = std::ranges::find_if(state.groups, [&](const auto &gr) {
+            return gr.getId() == state.selectedGroupId;
+          });
+          return g != state.groups.end() ? g->getMembers() : std::vector<int32_t>{};
+        }();
+        std::map<int32_t, std::string> freshSkdms;
+        if (state.groupSenderKeys.contains(state.selectedGroupId)) {
+          auto newKey = randomBytes(KEY_BYTES);
+          for (const int32_t mid : members) {
+            if (mid == targetId || mid == state.localUser->getId()) continue;
+            freshSkdms[mid] = encryptSkdmForMember(
+                api, state.localUser->getAccessToken(), mid,
+                state.localUser->getKeyBundle().ikX, newKey);
+          }
+          state.groupSenderKeys[state.selectedGroupId] = newKey;
+          OPENSSL_cleanse(newKey.data(), newKey.size());
+        }
+        api.removeGroupMember(state.localUser->getAccessToken(),
+                              state.selectedGroupId, targetId, freshSkdms);
+        state.selectedMemberIndex = -1;
+        state.statusMsg = "Member removed.";
+      } catch (const std::exception &e) {
+        state.statusMsg = std::string("Remove failed: ") + e.what();
+      }
+      state.msgsDirty = true;
+      scr.PostEvent(Event::Custom);
+    }).detach();
   });
 
   state.allLabels->clear();
@@ -985,8 +1081,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       });
 
   const auto rightPanel = Renderer(
-      Container::Vertical({msgMenu, composeInput, btnSend, btnDelete}),
-      [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels] {
+      Container::Vertical({msgMenu, composeInput, btnSend, btnDelete,
+                           addMemberInput, btnAddMember, btnRemoveMember}),
+      [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels,
+       addMemberInput, btnAddMember, btnRemoveMember] {
         if (state.msgsDirty) {
           rebuildMsgLabels();
           state.msgsDirty = false;
@@ -1010,14 +1108,28 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                 hbox({composeInput->Render() | flex, btnSend->Render()}));
         }
         if (state.viewingGroup && state.selectedGroupId >= 0) {
-          // Show current group members
           const auto git = std::ranges::find_if(
               state.groups, [&](const auto &g) {
                 return g.getId() == state.selectedGroupId;
               });
-          if (git != state.groups.end() && !git->getMembers().empty()) {
+          if (git != state.groups.end()) {
             rows.emplace_back(separator());
-            rows.emplace_back(text(" Members: ") | dim);
+            rows.emplace_back(text(" Members:") | dim);
+            const auto &members = git->getMembers();
+            for (int i = 0; i < static_cast<int>(members.size()); ++i) {
+              const int32_t mid = members[i];
+              const bool selected = (state.selectedMemberIndex == i);
+              auto label = text("  " + usernameById(mid));
+              if (selected) label = label | inverted;
+              if (mid == state.localUser->getId()) label = label | dim;
+              rows.emplace_back(
+                  hbox({std::move(label) | flex,
+                        selected ? btnRemoveMember->Render() : text("") }));
+            }
+            rows.emplace_back(
+                hbox({addMemberInput->Render() | flex |
+                          size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
+                      btnAddMember->Render()}));
           }
         }
         if (!state.statusMsg.empty())
@@ -1080,10 +1192,109 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                      filler()});
       });
 
+  // ── Blockchain overlay ────────────────────────────────────────────────────
+  auto chainVerifyInput = Input(&state.chainVerifyInput, "paste proof package JSON…");
+
+  auto btnExportSegment = Button(" Export Segment ", [&] {
+    try {
+      if (!state.localUser || !state.messageStore) {
+        state.chainStatus = "Not logged in."; return;
+      }
+      // Collect up to 5 most recent messages from the current conversation.
+      std::string convLabel;
+      state.chainLastEnvs.clear();
+
+      auto addEnvs = [&](const auto& msgs, const std::string& cid) {
+        const int take = std::min(static_cast<int>(msgs.size()), 5);
+        for (int i = static_cast<int>(msgs.size()) - take; i < static_cast<int>(msgs.size()); ++i) {
+          MessageEnvelope env;
+          env.messageId      = std::to_string(msgs[static_cast<std::size_t>(i)].getId());
+          env.senderId       = std::to_string(msgs[static_cast<std::size_t>(i)].getUserId());
+          env.ciphertext     = msgs[static_cast<std::size_t>(i)].getCiphertext();
+          env.conversationId = cid;
+          state.chainLastEnvs.push_back(std::move(env));
+        }
+      };
+
+      if (state.viewingGroup && state.selectedGroupId >= 0) {
+        convLabel = "group-" + std::to_string(state.selectedGroupId);
+        addEnvs(state.messageStore->getByGroup(state.selectedGroupId), convLabel);
+      } else if (!state.viewingGroup && state.selectedContactId >= 0) {
+        convLabel = "direct-" + std::to_string(std::min(state.localUser->getId(),
+                                                         state.selectedContactId))
+                  + "-" + std::to_string(std::max(state.localUser->getId(),
+                                                   state.selectedContactId));
+        addEnvs(state.messageStore->getByUser(state.selectedContactId), convLabel);
+      } else {
+        state.chainStatus = "Select a conversation first."; return;
+      }
+      if (state.chainLastEnvs.empty()) { state.chainStatus = "No messages in this conversation."; return; }
+      const std::string pubB64 = base64Encode(state.localUser->getKeyBundle().ik.pub);
+      state.chainDigest = BlockchainManager::buildSegmentDigest(
+          state.chainLastEnvs, convLabel, ++state.chainSegIdx, pubB64);
+      const auto path = BlockchainManager::writeSegmentFile(state.chainLastEnvs, state.chainDigest);
+      state.chainStatus = "Exported: " + path + "  hash: " + state.chainDigest.segmentHash.substr(0,12) + "…";
+    } catch (const std::exception &ex) {
+      state.chainStatus = std::string("Error: ") + ex.what();
+    }
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto btnVerifyIntegrity = Button(" Verify Integrity ", [&] {
+    try {
+      if (state.chainVerifyInput.empty()) {
+        state.chainVerifyResult = "Paste a proof package JSON first."; return;
+      }
+      auto pkg = nlohmann::json::parse(state.chainVerifyInput, nullptr, false);
+      if (pkg.is_discarded()) { state.chainVerifyResult = "Invalid JSON."; return; }
+      const auto local = BlockchainManager::verifyLocalHashes(pkg);
+      if (local != "OK") { state.chainVerifyResult = local; return; }
+      state.chainVerifyResult = "Local: OK  (set RPC URL in source to also verify on-chain)";
+    } catch (const std::exception &ex) {
+      state.chainVerifyResult = std::string("Error: ") + ex.what();
+    }
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto btnCloseChain = Button(" Close ", [&] {
+    state.showBlockchainOverlay = false;
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto chainOverlayComp = Renderer(
+      Container::Vertical({chainVerifyInput, btnExportSegment,
+                           btnVerifyIntegrity, btnCloseChain}),
+      [&, chainVerifyInput, btnExportSegment, btnVerifyIntegrity, btnCloseChain] {
+        if (!state.showBlockchainOverlay) return text("");
+        Elements body = {
+            text(" Blockchain ") | bold | center,
+            separator(),
+            text(" Export Segment ") | dim,
+            text(" Take up to 5 messages from current conversation and export for recording. ") | dim,
+            hbox({filler(), btnExportSegment->Render(), filler()}),
+            text(" " + state.chainStatus) | color(Color::Cyan),
+            separator(),
+            text(" Verify Integrity ") | dim,
+            hbox({text(" JSON: "), chainVerifyInput->Render() | flex}),
+            hbox({filler(), btnVerifyIntegrity->Render(), filler()}),
+            text(" " + state.chainVerifyResult) | color(Color::Yellow),
+            separator(),
+            hbox({filler(), btnCloseChain->Render(), filler()}),
+        };
+        return vbox({filler(),
+                     hbox({filler(),
+                           vbox(std::move(body)) | border |
+                               size(WIDTH, GREATER_THAN, MAIN_PANEL_MIN_WIDTH),
+                           filler()}),
+                     filler()});
+      });
+
   return CatchEvent(
-      Renderer(Container::Tab({split, overlayComp}, &state.tabIdx),
-               [&, split, overlayComp] {
-                 state.tabIdx = state.showIdentityOverlay ? 1 : 0;
+      Renderer(Container::Tab({split, overlayComp, chainOverlayComp}, &state.tabIdx),
+               [&, split, overlayComp, chainOverlayComp] {
+                 if (state.showIdentityOverlay)        state.tabIdx = 1;
+                 else if (state.showBlockchainOverlay) state.tabIdx = 2;
+                 else                                  state.tabIdx = 0;
                  auto base = vbox({
                      hbox({text(" SecureMsg ") | bold, filler(),
                            state.localUser
@@ -1093,13 +1304,15 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                                        + "] ") |
                                   dim)
                                : text(""),
-                           text(" [Ctrl+K] identity  [Ctrl+Q] quit ") | dim}) |
+                           text(" [Ctrl+K] identity  [Ctrl+B] blockchain  [Ctrl+M] member  [Ctrl+Q] quit ") | dim}) |
                          bgcolor(Color::Blue),
                      split->Render() | flex,
                  });
-                 if (!state.showIdentityOverlay)
-                   return base;
-                 return dbox({base, overlayComp->Render()});
+                 if (state.showIdentityOverlay)
+                   return dbox({base, overlayComp->Render()});
+                 if (state.showBlockchainOverlay)
+                   return dbox({base, chainOverlayComp->Render()});
+                 return base;
                }),
       [&](const Event &e) {
         if (e == Event::Special("\x0b")) { // Ctrl+K — open identity overlay
@@ -1107,10 +1320,28 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           scr.PostEvent(Event::Custom);
           return true;
         }
+        if (e == Event::Special("\x02")) { // Ctrl+B — open blockchain overlay
+          state.showBlockchainOverlay = !state.showBlockchainOverlay;
+          scr.PostEvent(Event::Custom);
+          return true;
+        }
         if (e == Event::Special("\x11")) { // Ctrl+Q
           state.poller.reset();
           scr.ExitLoopClosure()();
           return true;
+        }
+        // Ctrl+M — cycle through group members for removal selection
+        if (e == Event::Special("\x0d") && state.viewingGroup &&
+            state.selectedGroupId >= 0) {
+          const auto git = std::ranges::find_if(
+              state.groups,
+              [&](const auto &g) { return g.getId() == state.selectedGroupId; });
+          if (git != state.groups.end() && !git->getMembers().empty()) {
+            const int n = static_cast<int>(git->getMembers().size());
+            state.selectedMemberIndex = (state.selectedMemberIndex + 1) % n;
+            scr.PostEvent(Event::Custom);
+            return true;
+          }
         }
         return false;
       });

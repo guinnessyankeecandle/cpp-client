@@ -139,3 +139,87 @@ TEST_CASE("MessageStore: wrong key returns fallback string not exception",
   // key2 is never used to write — confirming the guard is key identity
   REQUIRE(key1 != key2); // sanity: keys are distinct
 }
+
+// ── Group sender key ratchet tests ───────────────────────────────────────────
+// These cover the core of group message send/receive
+
+TEST_CASE("SenderKeyRatchet: basic encrypt-decrypt roundtrip", "[send_receive][group]") {
+  const auto senderKey = randomBytes(32);
+  auto sender = SenderKeyRatchetState::init(senderKey);
+  auto receiver = SenderKeyRatchetState::init(senderKey);
+
+  const std::vector<uint8_t> plain = {'h', 'i'};
+  const auto wire = sender.encrypt(plain);
+  REQUIRE(receiver.decrypt(wire).plaintext == plain);
+}
+
+TEST_CASE("SenderKeyRatchet: multiple messages in sequence", "[send_receive][group]") {
+  const auto sk = randomBytes(32);
+  auto alice = SenderKeyRatchetState::init(sk);
+  auto bob   = SenderKeyRatchetState::init(sk);
+
+  for (uint8_t i = 0; i < 10; ++i) {
+    const std::vector<uint8_t> p{i};
+    REQUIRE(bob.decrypt(alice.encrypt(p)).plaintext == p);
+  }
+}
+
+TEST_CASE("SenderKeyRatchet: different sender keys produce independent ratchets",
+          "[send_receive][group]") {
+  // Simulates two group members each having their own sender key after a re-key
+  const auto sk1 = randomBytes(32);
+  const auto sk2 = randomBytes(32);
+  REQUIRE(sk1 != sk2);
+
+  auto alice_send = SenderKeyRatchetState::init(sk1);
+  auto bob_send   = SenderKeyRatchetState::init(sk2);
+  auto alice_recv = SenderKeyRatchetState::init(sk1);
+  auto bob_recv   = SenderKeyRatchetState::init(sk2);
+
+  const std::vector<uint8_t> from_alice = {'a'};
+  const std::vector<uint8_t> from_bob   = {'b'};
+
+  REQUIRE(alice_recv.decrypt(alice_send.encrypt(from_alice)).plaintext == from_alice);
+  REQUIRE(bob_recv.decrypt(bob_send.encrypt(from_bob)).plaintext == from_bob);
+}
+
+TEST_CASE("SenderKeyRatchet: re-key produces new ratchet that rejects old messages",
+          "[send_receive][group]") {
+  const auto oldKey = randomBytes(32);
+  const auto newKey = randomBytes(32);
+
+  auto sender_old = SenderKeyRatchetState::init(oldKey);
+  auto sender_new = SenderKeyRatchetState::init(newKey);
+  auto receiver_new = SenderKeyRatchetState::init(newKey);
+
+  const auto old_wire = sender_old.encrypt({'o', 'l', 'd'});
+  const auto new_wire = sender_new.encrypt({'n', 'e', 'w'});
+
+  // New receiver can decrypt new messages
+  REQUIRE(receiver_new.decrypt(new_wire).plaintext ==
+          std::vector<uint8_t>{'n', 'e', 'w'});
+
+  // Old messages (encrypted with old key) fail against new ratchet
+  REQUIRE_THROWS(receiver_new.decrypt(old_wire));
+}
+
+TEST_CASE("SkdmEpochTracker: stale SKDMs are rejected after re-key",
+          "[send_receive][group]") {
+  SkdmEpochTracker tracker;
+  tracker.recordPosted(1, 0); // we posted epoch 1 for group 1
+
+  // Incoming SKDM at epoch 0 (pre re-key) is stale — must be rejected
+  REQUIRE(tracker.resolve(1, 0) < 0);
+
+  // Incoming SKDM at epoch 1 (our re-key epoch) is current
+  REQUIRE(tracker.resolve(1, 1) >= 0);
+
+  // Incoming SKDM at epoch 2 (newer than ours) is fine
+  REQUIRE(tracker.resolve(1, 2) >= 0);
+}
+
+TEST_CASE("SkdmEpochTracker: unknown group always accepts", "[send_receive][group]") {
+  const SkdmEpochTracker tracker;
+  REQUIRE(tracker.resolve(99, 0) >= 0);
+  REQUIRE(tracker.resolve(99, 5) >= 0);
+}
