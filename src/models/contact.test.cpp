@@ -35,3 +35,17 @@ TEST_CASE("contactCache save-load roundtrip", "[contact]") {
   REQUIRE_FALSE(loaded.at(1).isVerified());
   std::filesystem::remove(path);
 }
+
+TEST_CASE("Contact constructed with identity pub exposes it correctly", "[contact]") {
+  const std::vector<uint8_t> ikPub(32, 0xAB);
+  const Contact c(42, "alice", ikPub);
+  REQUIRE(c.getIdentityPub() == ikPub);
+  REQUIRE(c.getId() == 42);
+  REQUIRE(c.getUsername() == "alice");
+}
+
+TEST_CASE("Contact constructed with empty identity pub reports not verified", "[contact]") {
+  const Contact c(1, "bob", {});
+  REQUIRE(c.getIdentityPub().empty());
+  REQUIRE(!c.isVerified());
+}

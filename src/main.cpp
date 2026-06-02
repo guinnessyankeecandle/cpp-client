@@ -250,7 +250,7 @@ Component makeRegisterScreen(AppState &state, ScreenInteractive &scr,
         // Remove old DB on new registration — old messages used a different key
         std::filesystem::remove("messages.db");
         state.messageStore =
-            MessageStore("messages.db", state.localUser->getDbKey());
+            MessageStore("messages_" + state.loginUsername + ".db", state.localUser->getDbKey());
         state.regShowTotp = false;
         state.regTotpUri.clear();
         state.screen = AppScreen::Main;
@@ -414,7 +414,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
 
         state.contactCache = contactCacheLoad("known_identities.json");
         state.messageStore =
-            MessageStore("messages.db", state.localUser->getDbKey());
+            MessageStore("messages_" + state.loginUsername + ".db", state.localUser->getDbKey());
         state.screen = AppScreen::Main;
       } catch (const std::exception &e) {
         state.loginTotpStatus = std::string("Error: ") + e.what();
@@ -512,10 +512,13 @@ struct Poller {
                     [senderId](const auto &c) { return c.getId() == senderId; });
                 if (!known) {
                   try {
-                    const auto res = api.lookupById(lu.getAccessToken(), senderId);
+                    const auto res  = api.lookupById(lu.getAccessToken(), senderId);
                     const auto name = res.at("username").get<std::string>();
+                    const auto ikRes = api.lookupByUsername(lu.getAccessToken(), name);
+                    const auto ikPub = base64Decode(
+                        ikRes.at("identity_pub").get<std::string>());
                     std::lock_guard<std::mutex> lk(state.stateMutex);
-                    state.contacts.emplace_back(senderId, name, std::vector<uint8_t>{});
+                    state.contacts.emplace_back(senderId, name, ikPub);
                   } catch (...) {}
                 }
               }
@@ -656,9 +659,11 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     if (cit != state.contactCache.end())
       return cit->getUsername();
     try {
-      const auto res = api.lookupById(state.localUser->getAccessToken(), id);
-      const auto name = res.at("username").get<std::string>();
-      state.contactCache.emplace_back(id, name, std::vector<uint8_t>{});
+      const auto res   = api.lookupById(state.localUser->getAccessToken(), id);
+      const auto name  = res.at("username").get<std::string>();
+      const auto ikRes = api.lookupByUsername(state.localUser->getAccessToken(), name);
+      const auto ikPub = base64Decode(ikRes.at("identity_pub").get<std::string>());
+      state.contactCache.emplace_back(id, name, ikPub);
       return name;
     } catch (...) {
       return "user:" + std::to_string(id);

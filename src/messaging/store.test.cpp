@@ -1,6 +1,7 @@
 #include <set>
 #include <catch2/catch.hpp>
 import securemsg.messaging.store;
+import securemsg.crypto.random;
 import securemsg.messaging.message;
 
 static Message makeMsg(const int32_t id, const int32_t userId = 1,
@@ -146,4 +147,27 @@ TEST_CASE("MessageStore getDirectSenderIds includes sent messages", "[store]") {
   const auto ids = s.getDirectSenderIds();
   REQUIRE(ids.size() == 1);
   REQUIRE(ids[0] == 42);
+}
+
+TEST_CASE("MessageStore different keys produce independent stores", "[store]") {
+  // Two users with different keys must not share decryptable data.
+  // We simulate this with two in-memory stores using different keys.
+  const auto key1 = randomBytes(32);
+  const auto key2 = randomBytes(32);
+  REQUIRE(key1 != key2);
+
+  const MessageStore s1(":memory:", key1);
+  const MessageStore s2(":memory:", key2);
+
+  s1.add(Message{1, 10, "ct", "hdr", BaseMessage::Direction::Received, 0, "user1 msg"});
+  s2.add(Message{2, 10, "ct", "hdr", BaseMessage::Direction::Received, 0, "user2 msg"});
+
+  // Each store reads only its own messages correctly
+  const auto m1 = s1.getByUser(10);
+  REQUIRE(m1.size() == 1);
+  REQUIRE(m1[0].getPlaintext() == "user1 msg");
+
+  const auto m2 = s2.getByUser(10);
+  REQUIRE(m2.size() == 1);
+  REQUIRE(m2[0].getPlaintext() == "user2 msg");
 }
