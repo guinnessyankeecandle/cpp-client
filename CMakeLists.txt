@@ -20,6 +20,9 @@ if(NOT TARGET sqlite_orm::sqlite_orm)
     FetchContent_Declare(sqlite_orm
         GIT_REPOSITORY https://github.com/fnc12/sqlite_orm.git
         GIT_TAG        v1.8.2)
+    # sqlite_orm's bundled ucm.cmake uses cmake_minimum_required < 3.5,
+    # which CMake 4.x no longer accepts — suppress with the recommended policy var
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
     FetchContent_MakeAvailable(sqlite_orm)
 endif()
 
