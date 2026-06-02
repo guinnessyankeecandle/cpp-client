@@ -24,13 +24,6 @@ cmake/
 .vscode/
 .clangd/
 
-# Claude / AI tooling
-.claude/
-memory/
-CLAUDE.md
-Backend.md
-CyberSec-Backend/
-
 # Runtime artifacts
 identity*.key
 docs/
