@@ -14,7 +14,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm cmake ninja clang git openssl curl nlohmann-json qrencode python-pip
-          pip install --quiet srp
+          pip install --quiet --break-system-packages srp
       - name: Configure
         env:
           CC: clang
@@ -33,7 +33,7 @@ jobs:
         run: |
           pacman -Syu --noconfirm
           pacman -S --noconfirm cmake ninja clang git openssl curl nlohmann-json qrencode python-pip checksec
-          pip install --quiet srp
+          pip install --quiet --break-system-packages srp
       - name: Build hardened Release binary
         env:
           CC: clang
