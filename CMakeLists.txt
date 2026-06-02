@@ -9,72 +9,28 @@ find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(SqliteOrm QUIET)
-set(_botan_lib_hints
-    /usr/lib64
-    /usr/lib/x86_64-linux-gnu
-    /usr/local/lib64
-    /usr/local/lib
-    /run/host/usr/lib64
-    /run/host/usr/lib/x86_64-linux-gnu)
-set(_botan_inc_hints
-    /usr/include
-    /usr/local/include
-    /run/host/usr/include)
 
-find_package(botan 3 QUIET CONFIG
-    HINTS ${_botan_lib_hints}
-    PATH_SUFFIXES cmake/Botan-3 cmake/botan-3 cmake)
-if(NOT botan_FOUND AND NOT Botan_FOUND)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        set(ENV{PKG_CONFIG_PATH}
-            "/usr/lib64/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-        pkg_check_modules(BOTAN QUIET botan-3)
-    endif()
-    if(BOTAN_FOUND)
-        add_library(Botan::Botan INTERFACE IMPORTED)
-        target_link_libraries(Botan::Botan INTERFACE ${BOTAN_LIBRARIES})
-        target_include_directories(Botan::Botan INTERFACE ${BOTAN_INCLUDE_DIRS})
-        target_compile_options(Botan::Botan INTERFACE ${BOTAN_CFLAGS_OTHER})
-        target_link_directories(Botan::Botan INTERFACE ${BOTAN_LIBRARY_DIRS})
-    else()
-        find_library(BOTAN_LIB NAMES botan-3 botan HINTS ${_botan_lib_hints})
-        find_path(BOTAN_INCLUDE_DIR botan/srp6.h
-            PATH_SUFFIXES botan-3 botan
-            HINTS ${_botan_inc_hints})
-        add_library(Botan::Botan UNKNOWN IMPORTED)
-        set_target_properties(Botan::Botan PROPERTIES
-            IMPORTED_LOCATION "${BOTAN_LIB}"
-            INTERFACE_INCLUDE_DIRECTORIES "${BOTAN_INCLUDE_DIR}")
-    endif()
+find_package(nlohmann_json REQUIRED PATHS
+    /usr/share/cmake/nlohmann_json
+    /run/host/usr/share/cmake/nlohmann_json
+    NO_DEFAULT_PATH)
+# ftxui requires Threads; pre-satisfy it for CLion's Flatpak cmake
+if(NOT TARGET Threads::Threads)
+    set(CMAKE_THREAD_LIBS_INIT "-lpthread")
+    set(CMAKE_HAVE_THREADS_LIBRARY 1)
+    set(CMAKE_USE_PTHREADS_INIT 1)
+    set(Threads_FOUND TRUE)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+    target_link_options(Threads::Threads INTERFACE -lpthread)
 endif()
-
-include(FetchContent)
-
-
-find_package(nlohmann_json QUIET)
-if(NOT nlohmann_json_FOUND)
-    FetchContent_Declare(nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3)
-    FetchContent_MakeAvailable(nlohmann_json)
-endif()
-
-find_package(ftxui QUIET)
-if(NOT ftxui_FOUND)
-    FetchContent_Declare(ftxui
-        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
-        GIT_TAG        v5.0.0)
-    FetchContent_MakeAvailable(ftxui)
-endif()
-
-find_package(Catch2 QUIET)
-if(NOT Catch2_FOUND)
-    FetchContent_Declare(Catch2
-        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-        GIT_TAG        v2.13.10)
-    FetchContent_MakeAvailable(Catch2)
-endif()
+find_package(ftxui REQUIRED PATHS
+    /usr/lib64/cmake/ftxui
+    /run/host/usr/lib64/cmake/ftxui
+    NO_DEFAULT_PATH)
+find_package(Catch2 REQUIRED PATHS
+    /usr/lib64/cmake/Catch2
+    /run/host/usr/lib64/cmake/Catch2
+    NO_DEFAULT_PATH)
 
 # ── Crypto ────────────────────────────────────────────────────────────────────
 add_library(securemsg_crypto)
@@ -91,7 +47,11 @@ target_sources(securemsg_crypto PUBLIC
         src/crypto/keystore.cppm
         src/crypto/srp.cppm
         src/crypto/crypto.cppm)
-target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto Botan::Botan)
+target_include_directories(securemsg_crypto PUBLIC
+    /usr/include/python3.14
+    /run/host/usr/include/python3.14)
+target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto
+    /usr/lib64/libpython3.14.so)
 target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -127,11 +87,17 @@ target_sources(securemsg_messaging PUBLIC
 target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm)
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
+# ── Main logic (pure, testable) ───────────────────────────────────────────────
+add_library(securemsg_main_logic)
+target_sources(securemsg_main_logic PUBLIC
+    FILE_SET CXX_MODULES FILES src/main_logic.cppm)
+target_compile_options(securemsg_main_logic PRIVATE -Wall -Wextra)
+
 # ── Main binary ───────────────────────────────────────────────────────────────
 add_executable(securemsg src/main.cpp)
 target_link_libraries(securemsg PRIVATE
     securemsg_models securemsg_crypto securemsg_network securemsg_messaging
-    ftxui::screen ftxui::dom ftxui::component)
+    securemsg_main_logic ftxui::screen ftxui::dom ftxui::component)
 target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -143,6 +109,6 @@ if(TEST_SOURCES)
         ${TEST_SOURCES})
     target_link_libraries(cybersec_tests PRIVATE
         securemsg_models securemsg_crypto securemsg_network securemsg_messaging
-        sqlite_orm::sqlite_orm Catch2::Catch2)
+        securemsg_main_logic sqlite_orm::sqlite_orm Catch2::Catch2)
     add_test(NAME cybersec_tests COMMAND cybersec_tests)
 endif()

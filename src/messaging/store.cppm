@@ -162,9 +162,13 @@ private:
   decryptPlaintext(const std::vector<char> &blob) const {
     if (m_encKey.empty())
       return {blob.begin(), blob.end()};
-    const std::vector<uint8_t> bytes(blob.begin(), blob.end());
-    const auto plain = aeadDecrypt(unpackAead(bytes), m_encKey);
-    return {plain.begin(), plain.end()};
+    try {
+      const std::vector<uint8_t> bytes(blob.begin(), blob.end());
+      const auto plain = aeadDecrypt(unpackAead(bytes), m_encKey);
+      return {plain.begin(), plain.end()};
+    } catch (...) {
+      return "[encrypted with different key]";
+    }
   }
 
   [[nodiscard]] DirectRow toRow(const Message &m) const {

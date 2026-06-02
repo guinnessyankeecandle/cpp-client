@@ -1,181 +1,141 @@
 module;
-#include <algorithm>
-#include <botan/auto_rng.h>
-#include <botan/bigint.h>
-#include <botan/dl_group.h>
-#include <botan/hex.h>
-#include <botan/numthry.h>
-#include <botan/reducer.h>
-#include <botan/srp6.h>
+#include <Python.h>
 #include <cstdint>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 export module securemsg.crypto.srp;
-import securemsg.crypto.random;
-import securemsg.crypto.aead;
 
-using MdCtxPtr = OssPtr<EVP_MD_CTX, EVP_MD_CTX_free>;
+struct PyObjDeleter {
+    void operator()(PyObject* p) const noexcept { Py_XDECREF(p); }
+};
+using PyPtr = std::unique_ptr<PyObject, PyObjDeleter>;
 
-static std::string stripHexPrefix(const std::string &s) {
-  return s.substr(0, 2) == "0x" ? s.substr(2) : s;
+static void checkPyErr(const char* where) {
+    if (PyErr_Occurred()) {
+        PyErr_Print();
+        throw std::runtime_error(std::string("SRP: ") + where + " failed");
+    }
 }
 
-static std::string toLower(std::string s) {
-  std::ranges::transform(s, s.begin(),
-                         [](const unsigned char c) { return std::tolower(c); });
-  return s;
+static std::vector<uint8_t> hexDecode(const std::string& hex) {
+    std::vector<uint8_t> out(hex.size() / 2);
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = static_cast<uint8_t>(std::stoul(hex.substr(i * 2, 2), nullptr, 16));
+    return out;
+}
+
+static std::string hexEncode(const uint8_t* data, const std::size_t len) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out(len * 2, '\0');
+    for (std::size_t i = 0; i < len; ++i) {
+        out[i * 2]     = digits[data[i] >> 4];
+        out[i * 2 + 1] = digits[data[i] & 0xf];
+    }
+    return out;
+}
+
+static std::string bytesToHex(PyObject* bytesObj) {
+    const char* data = PyBytes_AsString(bytesObj);
+    const auto len = static_cast<std::size_t>(PyBytes_Size(bytesObj));
+    return hexEncode(reinterpret_cast<const uint8_t*>(data), len);
 }
 
 export struct SrpProof {
-  std::string clientPublicHex;
-  std::string clientProofHex;
+    std::string clientPublicHex;
+    std::string clientProofHex;
 };
 
 export class SrpSession {
 public:
-  static std::string computeVerifier(const std::string &username,
-                                     const std::string &password,
-                                     std::string &saltHexOut) {
-    const auto saltBytes = randomBytes(KEY_BYTES);
+    static std::string computeVerifier(const std::string& username,
+                                       const std::string& password,
+                                       std::string& saltHexOut) {
+        const auto [srp, sha256, ng4096] = srpConstants();
 
-    const Botan::BigInt verifier = Botan::srp6_generate_verifier(
-        username, password, saltBytes, SRP_GROUP, SRP_HASH);
+        // create_salted_verification_key(username, password, SHA256, NG_4096, None, None, salt_len=32)
+        const PyPtr result(PyObject_CallMethod(srp.get(), "create_salted_verification_key",
+                                               "ssOOOOi", username.c_str(), password.c_str(),
+                                               sha256.get(), ng4096.get(), Py_None, Py_None, 32));
+        checkPyErr("create_salted_verification_key");
 
-    saltHexOut = toLower(Botan::hex_encode(saltBytes));
-    return toLower(stripHexPrefix(verifier.to_hex_string()));
-  }
+        saltHexOut = bytesToHex(PyTuple_GetItem(result.get(), 0));
+        return bytesToHex(PyTuple_GetItem(result.get(), 1));
+    }
 
-  SrpProof computeProof(const std::string &username,
-                        const std::string &password,
-                        const std::string &srpSaltHex,
-                        const std::string &serverPublicHex) {
-    Botan::AutoSeeded_RNG rng;
+    SrpProof computeProof(const std::string& username,
+                          const std::string& password,
+                          const std::string& srpSaltHex,
+                          const std::string& serverPublicHex) {
+        const auto [srp, sha256, ng4096] = srpConstants();
 
-    const Botan::BigInt serverPublic =
-        Botan::BigInt::from_string("0x" + serverPublicHex);
-    const auto saltBytes = Botan::hex_decode(srpSaltHex);
+        // usr = srp.User(username, password, SHA256, NG_4096)
+        m_srpUser.reset(PyObject_CallMethod(srp.get(), "User", "ssOO",
+                                            username.c_str(), password.c_str(),
+                                            sha256.get(), ng4096.get()));
+        checkPyErr("srp.User");
 
-    const Botan::DL_Group group = Botan::DL_Group::from_name(SRP_GROUP);
-    const Botan::BigInt &N = group.get_p();
-    const Botan::BigInt &g = group.get_g();
+        // uname, A = usr.start_authentication()
+        const PyPtr authTuple(PyObject_CallMethod(m_srpUser.get(), "start_authentication", nullptr));
+        checkPyErr("start_authentication");
+        const std::string clientPublicHex = bytesToHex(PyTuple_GetItem(authTuple.get(), 1));
 
-    // k = H(N_padded || g_padded) — RFC 5054
-    const auto N_bytes = N.serialize(SRP_FIELD_BYTES);
-    const auto g_bytes_padded_k = g.serialize(SRP_FIELD_BYTES);
-    const auto k_hash = sha256({{N_bytes.data(), N_bytes.size()},
-                                {g_bytes_padded_k.data(), g_bytes_padded_k.size()}});
-    const Botan::BigInt k(k_hash.data(), k_hash.size());
+        // M1 = usr.process_challenge(salt_bytes, B_bytes)
+        const std::vector<uint8_t> saltBytes = hexDecode(srpSaltHex);
+        const std::vector<uint8_t> BBytes    = hexDecode(serverPublicHex);
 
-    // Ephemeral a, A = g^a mod N
-    const Botan::BigInt a(rng, 256);
-    m_clientPublic = group.power_g_p(a, N.bits());
+        const PyPtr saltObj(PyBytes_FromStringAndSize(
+            reinterpret_cast<const char*>(saltBytes.data()),
+            static_cast<Py_ssize_t>(saltBytes.size())));
+        const PyPtr BObj(PyBytes_FromStringAndSize(
+            reinterpret_cast<const char*>(BBytes.data()),
+            static_cast<Py_ssize_t>(BBytes.size())));
 
-    // u = H(pad(A) || pad(B))
-    const auto A_bytes = m_clientPublic.serialize(SRP_FIELD_BYTES);
-    const auto B_bytes = serverPublic.serialize(SRP_FIELD_BYTES);
-    const auto u_hash = sha256({{A_bytes.data(), A_bytes.size()},
-                                {B_bytes.data(), B_bytes.size()}});
-    const Botan::BigInt u(u_hash.data(), u_hash.size());
+        const PyPtr M1(PyObject_CallMethod(m_srpUser.get(), "process_challenge",
+                                           "OO", saltObj.get(), BObj.get()));
+        checkPyErr("process_challenge");
 
-    // x = H(salt || H(username:password))
-    const std::string cred = username + ":" + password;
-    const auto h_cred = sha256(
-        {{reinterpret_cast<const uint8_t *>(cred.data()), cred.size()}});
-    const auto x_bytes = sha256({{saltBytes.data(), saltBytes.size()},
-                                 {h_cred.data(), h_cred.size()}});
-    const Botan::BigInt x(x_bytes.data(), x_bytes.size());
+        if (M1.get() == Py_None)
+            throw std::runtime_error("SRP: server public value rejected");
 
-    // S = (B - k*g^x mod N)^(a + u*x) mod N
-    const Botan::Modular_Reducer mod_N(N);
-    const Botan::BigInt gx   = group.power_g_p(x, N.bits());
-    const Botan::BigInt kgx  = mod_N.reduce(k * gx);
-    const Botan::BigInt base = mod_N.reduce(serverPublic - kgx + N);
-    const Botan::BigInt S    = Botan::power_mod(base, a + u * x, N);
+        return {clientPublicHex, bytesToHex(M1.get())};
+    }
 
-    // K = H(minimal S bytes) — pysrp uses long_to_bytes(S) without padding
-    const auto S_min = S.serialize();
-    m_sessionKey = sha256({{S_min.data(), S_min.size()}});
+    [[nodiscard]] bool verifyServerProof(const std::string& serverProofHex) const {
+        if (!m_srpUser)
+            throw std::runtime_error("SRP: cannot verify before completing handshake");
 
-    // Conversions to big endian
-    const auto modulusBytes = N.serialize(SRP_FIELD_BYTES);
-    const auto clientPublicBytes = m_clientPublic.serialize(SRP_FIELD_BYTES);
-    const auto serverPublicBytes = serverPublic.serialize(SRP_FIELD_BYTES);
+        const std::vector<uint8_t> M2Bytes = hexDecode(serverProofHex);
+        const PyPtr M2(PyBytes_FromStringAndSize(
+            reinterpret_cast<const char*>(M2Bytes.data()),
+            static_cast<Py_ssize_t>(M2Bytes.size())));
 
-    const auto hashModulus =
-        sha256({{modulusBytes.data(), modulusBytes.size()}});
-    const auto hashGenerator =
-        sha256({{g_bytes_padded_k.data(), g_bytes_padded_k.size()}});
-    std::vector<uint8_t> xorNG(KEY_BYTES);
-    for (std::size_t i = 0; i < KEY_BYTES; ++i)
-      xorNG[i] = hashModulus[i] ^ hashGenerator[i];
+        PyObject_CallMethod(m_srpUser.get(), "verify_session", "O", M2.get());
+        checkPyErr("verify_session");
 
-    const auto hashUser =
-        sha256({{reinterpret_cast<const uint8_t *>(username.data()),
-                 username.size()}});
+        const PyPtr auth(PyObject_CallMethod(m_srpUser.get(), "authenticated", nullptr));
+        checkPyErr("authenticated");
 
-    m_clientProof = sha256({
-        {xorNG.data(), xorNG.size()},
-        {hashUser.data(), hashUser.size()},
-        {saltBytes.data(), saltBytes.size()},
-        {clientPublicBytes.data(), clientPublicBytes.size()},
-        {serverPublicBytes.data(), serverPublicBytes.size()},
-        {m_sessionKey.data(), m_sessionKey.size()},
-    });
-
-
-    return {toLower(stripHexPrefix(m_clientPublic.to_hex_string())),
-            toLower(Botan::hex_encode(m_clientProof))};
-  }
-
-  bool verifyServerProof(const std::string &serverProofHex) const {
-    if (m_sessionKey.empty() || m_clientProof.empty())
-      throw std::runtime_error(
-          "SRP: cannot verify server proof before completing handshake");
-
-    const auto clientPublicBytes = m_clientPublic.serialize(SRP_FIELD_BYTES);
-    const auto expected = sha256({
-        {clientPublicBytes.data(), clientPublicBytes.size()},
-        {m_clientProof.data(), m_clientProof.size()},
-        {m_sessionKey.data(), m_sessionKey.size()},
-    });
-
-    const auto serverProofBytes =
-        Botan::BigInt::from_string("0x" + serverProofHex).serialize(KEY_BYTES);
-    return CRYPTO_memcmp(expected.data(), serverProofBytes.data(), KEY_BYTES) ==
-           0;
-  }
-
-  ~SrpSession() {
-    if (!m_sessionKey.empty())
-      OPENSSL_cleanse(m_sessionKey.data(), m_sessionKey.size());
-    if (!m_clientProof.empty())
-      OPENSSL_cleanse(m_clientProof.data(), m_clientProof.size());
-  }
+        return PyObject_IsTrue(auth.get()) == 1;
+    }
 
 private:
-  static constexpr auto SRP_GROUP = "modp/srp/4096";
-  static constexpr auto SRP_HASH = "SHA-256";
-  static constexpr std::size_t SRP_FIELD_BYTES =
-      512; // 4096-bit group → 512 bytes
+    struct SrpConsts { PyPtr srp, sha256, ng4096; };
 
-  // Avoids allocating a concatenated buffer.
-  static std::vector<uint8_t>
-  sha256(std::initializer_list<std::pair<const uint8_t *, std::size_t>> parts) {
-    const MdCtxPtr ctx(EVP_MD_CTX_new());
-    EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr);
+    static SrpConsts srpConstants() {
+        if (!Py_IsInitialized())
+            Py_Initialize();
 
-    for (const auto &[data, len] : parts)
-      EVP_DigestUpdate(ctx.get(), data, len);
+        PyPtr srp(PyImport_ImportModule("srp"));
+        if (!srp) { PyErr_Print(); throw std::runtime_error("SRP: cannot import pysrp"); }
 
-    std::vector<uint8_t> out(KEY_BYTES);
-    EVP_DigestFinal_ex(ctx.get(), out.data(), nullptr);
-    return out;
-  }
+        PyPtr sha256(PyObject_GetAttrString(srp.get(), "SHA256"));
+        PyPtr ng4096(PyObject_GetAttrString(srp.get(), "NG_4096"));
+        checkPyErr("loading SRP constants");
 
-  Botan::BigInt m_clientPublic;
-  mutable std::vector<uint8_t> m_sessionKey;
-  mutable std::vector<uint8_t> m_clientProof;
+        return {std::move(srp), std::move(sha256), std::move(ng4096)};
+    }
+
+    PyPtr m_srpUser;
 };

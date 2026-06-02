@@ -88,3 +88,36 @@ TEST_CASE("MessageStore clear", "[store]") {
   REQUIRE(s.getByUser(1).empty());
   REQUIRE(s.getByGroup(10).empty());
 }
+
+TEST_CASE("MessageStore sent message appears in getByUser", "[store]") {
+  MessageStore s(":memory:", {});
+  // Simulate sending a message (Sent direction, userId = recipient)
+  const Message sent{1, 42, "ct", "hdr", BaseMessage::Direction::Sent, 1000, "hello"};
+  s.add(sent);
+  const auto msgs = s.getByUser(42);
+  REQUIRE(msgs.size() == 1);
+  REQUIRE(msgs[0].getPlaintext() == "hello");
+  REQUIRE(msgs[0].getDirection() == BaseMessage::Direction::Sent);
+}
+
+TEST_CASE("MessageStore received message appears in getByUser", "[store]") {
+  MessageStore s(":memory:", {});
+  const Message recv{2, 99, "ct", "hdr", BaseMessage::Direction::Received, 2000, "world"};
+  s.add(recv);
+  const auto msgs = s.getByUser(99);
+  REQUIRE(msgs.size() == 1);
+  REQUIRE(msgs[0].getPlaintext() == "world");
+  REQUIRE(msgs[0].getDirection() == BaseMessage::Direction::Received);
+}
+
+TEST_CASE("MessageStore mixed sent and received ordered by timestamp", "[store]") {
+  MessageStore s(":memory:", {});
+  s.add(Message{1, 5, "ct", "hdr", BaseMessage::Direction::Sent,     1000, "first"});
+  s.add(Message{2, 5, "ct", "hdr", BaseMessage::Direction::Received, 2000, "second"});
+  s.add(Message{3, 5, "ct", "hdr", BaseMessage::Direction::Sent,     3000, "third"});
+  const auto msgs = s.getByUser(5);
+  REQUIRE(msgs.size() == 3);
+  REQUIRE(msgs[0].getPlaintext() == "first");
+  REQUIRE(msgs[1].getPlaintext() == "second");
+  REQUIRE(msgs[2].getPlaintext() == "third");
+}

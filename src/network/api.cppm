@@ -137,7 +137,7 @@ public:
   [[nodiscard]] nlohmann::json
   createGroup(const std::string &accessToken, const std::string &name,
               const std::map<int32_t, std::string> &initialMembers) const {
-    nlohmann::json members;
+    nlohmann::json members = nlohmann::json::object(); // must be {} not null
     for (const auto &[uid, ct] : initialMembers)
       members[std::to_string(uid)] = ct;
     return m_http.post("/groups/",

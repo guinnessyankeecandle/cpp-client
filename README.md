@@ -85,7 +85,8 @@ The project targets modern Linux environments (Fedora/Debian) with GCC 16+ or Cl
 | Compiler     | `gcc-c++` / `clang`    | `g++` / `clang`        | C++23 Modules support    |
 | Build System | `cmake`, `ninja-build` | `cmake`, `ninja-build` | Generator for modules    |
 | Crypto       | `openssl-devel`        | `libssl-dev`           | AES, X25519, ML-KEM      |
-| Auth         | `botan3-devel`         | `libbotan-3-dev`       | SRP-6a client logic      |
+| Auth         | `python3-devel`        | `python3-dev`          | Python C API for pysrp   |
+| SRP          | `srp` (via pip)        | `srp` (via pip)        | SRP-6a client logic      |
 | JSON         | `nlohmann-json-devel`  | `nlohmann-json3-dev`   | JSON parsing/API         |
 | System       | `glibc-devel`          | `linux-libc-dev`       | Standard system headers  |
 | Kernel       | `kernel-headers`       | —                      | Linux kernel headers     |

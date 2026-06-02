@@ -24,20 +24,20 @@ if command -v dnf &>/dev/null; then
     install_if_missing dnf gcc-c++ cmake ninja-build git \
         openssl-devel libcurl-devel nlohmann-json-devel \
         glibc-devel kernel-headers qrencode clang \
-        catch2-devel ftxui-devel botan3-devel \
+        catch2-devel ftxui-devel python3-devel \
         sqlite-devel python3-pip
 elif command -v apt-get &>/dev/null; then
     install_if_missing apt-get g++ cmake ninja-build git \
         libssl-dev libcurl4-openssl-dev nlohmann-json3-dev \
         linux-libc-dev qrencode clang \
-        catch2-dev libftxui-dev python3-pip
+        catch2-dev libftxui-dev python3-dev python3-pip
 else
     echo "Unsupported package manager."
     exit 1
 fi
 
-# Install Conan and sqlite_orm dependency
-pip3 install --quiet conan
+# Install Python dependencies and Conan
+pip3 install --quiet srp conan
 if [ ! -f cmake-build-debug/sqlite_ormConfig.cmake ] && [ ! -f cmake-build-debug/sqlite_orm-config.cmake ]; then
     conan profile detect --force >/dev/null 2>&1 || true
     conan install . --output-folder=cmake-build-debug \
