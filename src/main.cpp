@@ -73,6 +73,7 @@ struct AppState {
   std::string overlayKeyB64;
   bool overlayVerified{false};
 
+  // Blockchain
   bool showBlockchainOverlay{false};
   std::string chainStatus;
   std::string chainVerifyInput;
@@ -101,7 +102,7 @@ struct AppState {
   std::set<int32_t> selectedGroupMembers;
   std::string addGroupMemberUsername;
   int32_t selectedMemberIndex{-1};
-  int menuSelected{0};
+  int menuSelected{-1}; // -1 = nothing selected; first click always fires on_change
   int msgSelected{0};
   int splitPos{32};
   int tabIdx{0};
@@ -484,16 +485,17 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
 struct Poller {
   Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api)
       : m_thread([&] {
-          static constexpr int SPK_ROTATE_INTERVAL = 2016;
+          static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
+          int contactTick = 1; // fetch groups on first poll (5 s after login)
           int spkRotateTick = SPK_ROTATE_INTERVAL;
 
           std::unique_lock<std::mutex> lock(m_mutex);
           while (!m_cv.wait_for(lock, std::chrono::seconds(5),
                                 [&] { return m_stop; })) {
             try {
-              if (!state.localUser)
-                throw std::runtime_error(
-                    "poll thread: localUser unexpectedly absent");
+              // Both must be set before we can do any work.
+              if (!state.localUser || !state.messageStore)
+                continue;
 
               const auto &lu = *state.localUser;
 
@@ -563,6 +565,7 @@ struct Poller {
                     {
                       std::lock_guard<std::mutex> lk(state.stateMutex);
                       state.contacts.emplace_back(senderId, name, ikPub);
+                      state.labelsDirty = true;
                     }
                     {
                       std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
@@ -691,6 +694,7 @@ struct Poller {
                 {
                   std::lock_guard<std::mutex> groupsLock(state.stateMutex);
                   state.groups = std::move(freshGroups);
+                  state.labelsDirty = true;
                 }
                 appendLog("[poller] group list committed\n");
               }
@@ -1041,16 +1045,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
   // Snapshot contact/group IDs under stateMutex to avoid data race with poller.
   // Uses try_to_lock so it NEVER blocks the FTXUI event loop thread.
-  // If the poller holds stateMutex, we skip this tick; the next on_change
-  // (hover or click retry) will succeed — the window is only microseconds.
-  auto selectItem = [&state, &scr, rebuildLabels] {
+  auto selectItem = [&state, &scr] {
     std::vector<int32_t> cIds, gIds;
     {
       std::unique_lock<std::mutex> lk(state.stateMutex, std::try_to_lock);
-      if (!lk) {
-        appendLog("[select] SKIPPED — stateMutex busy\n");
-        return;
-      }
+      if (!lk)
+        return; // Poller holds the lock; next click will succeed
       std::ranges::transform(state.contacts, std::back_inserter(cIds),
                              [](const auto &c) { return c.getId(); });
       std::ranges::transform(state.groups, std::back_inserter(gIds),
@@ -1066,7 +1066,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           state.selectedGroupMembers.erase(sel.id);
         else
           state.selectedGroupMembers.insert(sel.id);
-        rebuildLabels();
+        state.labelsDirty = true;
         scr.PostEvent(Event::Custom);
       }
       return;
@@ -1146,7 +1146,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     state.creatingGroup = !state.creatingGroup;
     if (!state.creatingGroup)
       state.selectedGroupMembers.clear();
-    rebuildLabels();
+    state.labelsDirty = true;
     scr.PostEvent(Event::Custom);
   });
 
@@ -1170,17 +1170,26 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           {
             std::lock_guard<std::mutex> lk(state.stateMutex);
             if (std::ranges::none_of(state.contacts,
-                                     [uid](const auto &c) {
-                                       return c.getId() == uid;
-                                     }))
+                                     [uid](const auto &c) { return c.getId() == uid; }))
               state.contacts.emplace_back(uid, username, ikPub);
+            // Auto-select the new contact so the chat loads immediately.
+            state.selectedContactId = uid;
+            state.viewingGroup = false;
+            state.msgsDirty = true;
+            // Sync menuSelected so the highlight matches.
+            for (int i = 0; i < static_cast<int>(state.contacts.size()); ++i) {
+              if (state.contacts[static_cast<std::size_t>(i)].getId() == uid) {
+                state.menuSelected = i;
+                break;
+              }
+            }
           }
           {
             std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
             state.usernameCache[uid] = username;
           }
+          rebuildLabels();
         }
-        rebuildLabels();
       } catch (const std::exception &e) {
         state.statusMsg = std::string("Add failed: ") + e.what();
       }
@@ -1193,7 +1202,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           {groupNameInput, btnCreateGroup, btnNewGroup, addInput, btnAdd, leftMenu}),
       [&, leftMenu, rebuildLabels, addInput, btnAdd,
        groupNameInput, btnCreateGroup, btnNewGroup] {
-        rebuildLabels();
+        if (state.labelsDirty) {
+          rebuildLabels();
+          state.labelsDirty = false;
+        }
         const int cCount = static_cast<int>(state.contacts.size());
         const int gCount = static_cast<int>(state.groups.size());
         Elements left;
@@ -1310,7 +1322,18 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
             for (int i = 0; i < static_cast<int>(memberSnapshot.size()); ++i) {
               const int32_t mid = memberSnapshot[i];
               const bool selected = (state.selectedMemberIndex == i);
-              auto label = text("  " + usernameById(mid));
+              // Cache-only lookup — never blocks or spawns threads from renderer.
+              auto nameIt = std::ranges::find_if(state.contacts,
+                  [mid](const auto &c) { return c.getId() == mid; });
+              const std::string mname = (nameIt != state.contacts.end())
+                  ? nameIt->getUsername()
+                  : [&] {
+                      auto cit = std::ranges::find_if(state.contactCache,
+                          [mid](const auto &c) { return c.getId() == mid; });
+                      return cit != state.contactCache.end()
+                          ? cit->getUsername() : "user:" + std::to_string(mid);
+                    }();
+              auto label = text("  " + mname);
               if (selected) label = label | inverted;
               if (mid == state.localUser->getId()) label = label | dim;
               rows.emplace_back(
