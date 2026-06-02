@@ -6,6 +6,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <mutex>
@@ -17,6 +18,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "BlockchainManager.hpp"
 import securemsg.models;
 import securemsg.crypto;
 import securemsg.messaging;
@@ -71,6 +73,15 @@ struct AppState {
   std::string overlayTargetName;
   std::string overlayKeyB64;
   bool overlayVerified{false};
+
+  // Blockchain
+  bool showBlockchainOverlay{false};
+  std::string chainStatus;
+  std::string chainVerifyInput;
+  std::string chainVerifyResult;
+  std::vector<MessageEnvelope> chainLastEnvs;
+  SegmentDigest chainDigest;
+  int chainSegIdx{0};
 
   std::unique_ptr<struct Poller> poller;
   std::mutex stateMutex;   // guards Poller→UI writes: contacts and groups
@@ -1173,10 +1184,109 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                      filler()});
       });
 
+  // ── Blockchain overlay ────────────────────────────────────────────────────
+  auto chainVerifyInput = Input(&state.chainVerifyInput, "paste proof package JSON…");
+
+  auto btnExportSegment = Button(" Export Segment ", [&] {
+    try {
+      if (!state.localUser || !state.messageStore) {
+        state.chainStatus = "Not logged in."; return;
+      }
+      // Collect up to 5 most recent messages from the current conversation.
+      std::string convLabel;
+      state.chainLastEnvs.clear();
+
+      auto addEnvs = [&](const auto& msgs, const std::string& cid) {
+        const int take = std::min(static_cast<int>(msgs.size()), 5);
+        for (int i = static_cast<int>(msgs.size()) - take; i < static_cast<int>(msgs.size()); ++i) {
+          MessageEnvelope env;
+          env.messageId      = std::to_string(msgs[static_cast<std::size_t>(i)].getId());
+          env.senderId       = std::to_string(msgs[static_cast<std::size_t>(i)].getUserId());
+          env.ciphertext     = msgs[static_cast<std::size_t>(i)].getCiphertext();
+          env.conversationId = cid;
+          state.chainLastEnvs.push_back(std::move(env));
+        }
+      };
+
+      if (state.viewingGroup && state.selectedGroupId >= 0) {
+        convLabel = "group-" + std::to_string(state.selectedGroupId);
+        addEnvs(state.messageStore->getByGroup(state.selectedGroupId), convLabel);
+      } else if (!state.viewingGroup && state.selectedContactId >= 0) {
+        convLabel = "direct-" + std::to_string(std::min(state.localUser->getId(),
+                                                         state.selectedContactId))
+                  + "-" + std::to_string(std::max(state.localUser->getId(),
+                                                   state.selectedContactId));
+        addEnvs(state.messageStore->getByUser(state.selectedContactId), convLabel);
+      } else {
+        state.chainStatus = "Select a conversation first."; return;
+      }
+      if (state.chainLastEnvs.empty()) { state.chainStatus = "No messages in this conversation."; return; }
+      const std::string pubB64 = base64Encode(state.localUser->getKeyBundle().ik.pub);
+      state.chainDigest = BlockchainManager::buildSegmentDigest(
+          state.chainLastEnvs, convLabel, ++state.chainSegIdx, pubB64);
+      const auto path = BlockchainManager::writeSegmentFile(state.chainLastEnvs, state.chainDigest);
+      state.chainStatus = "Exported: " + path + "  hash: " + state.chainDigest.segmentHash.substr(0,12) + "…";
+    } catch (const std::exception &ex) {
+      state.chainStatus = std::string("Error: ") + ex.what();
+    }
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto btnVerifyIntegrity = Button(" Verify Integrity ", [&] {
+    try {
+      if (state.chainVerifyInput.empty()) {
+        state.chainVerifyResult = "Paste a proof package JSON first."; return;
+      }
+      auto pkg = nlohmann::json::parse(state.chainVerifyInput, nullptr, false);
+      if (pkg.is_discarded()) { state.chainVerifyResult = "Invalid JSON."; return; }
+      const auto local = BlockchainManager::verifyLocalHashes(pkg);
+      if (local != "OK") { state.chainVerifyResult = local; return; }
+      state.chainVerifyResult = "Local: OK  (set RPC URL in source to also verify on-chain)";
+    } catch (const std::exception &ex) {
+      state.chainVerifyResult = std::string("Error: ") + ex.what();
+    }
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto btnCloseChain = Button(" Close ", [&] {
+    state.showBlockchainOverlay = false;
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto chainOverlayComp = Renderer(
+      Container::Vertical({chainVerifyInput, btnExportSegment,
+                           btnVerifyIntegrity, btnCloseChain}),
+      [&, chainVerifyInput, btnExportSegment, btnVerifyIntegrity, btnCloseChain] {
+        if (!state.showBlockchainOverlay) return text("");
+        Elements body = {
+            text(" Blockchain ") | bold | center,
+            separator(),
+            text(" Export Segment ") | dim,
+            text(" Take up to 5 messages from current conversation and export for recording. ") | dim,
+            hbox({filler(), btnExportSegment->Render(), filler()}),
+            text(" " + state.chainStatus) | color(Color::Cyan),
+            separator(),
+            text(" Verify Integrity ") | dim,
+            hbox({text(" JSON: "), chainVerifyInput->Render() | flex}),
+            hbox({filler(), btnVerifyIntegrity->Render(), filler()}),
+            text(" " + state.chainVerifyResult) | color(Color::Yellow),
+            separator(),
+            hbox({filler(), btnCloseChain->Render(), filler()}),
+        };
+        return vbox({filler(),
+                     hbox({filler(),
+                           vbox(std::move(body)) | border |
+                               size(WIDTH, GREATER_THAN, MAIN_PANEL_MIN_WIDTH),
+                           filler()}),
+                     filler()});
+      });
+
   return CatchEvent(
-      Renderer(Container::Tab({split, overlayComp}, &state.tabIdx),
-               [&, split, overlayComp] {
-                 state.tabIdx = state.showIdentityOverlay ? 1 : 0;
+      Renderer(Container::Tab({split, overlayComp, chainOverlayComp}, &state.tabIdx),
+               [&, split, overlayComp, chainOverlayComp] {
+                 if (state.showIdentityOverlay)        state.tabIdx = 1;
+                 else if (state.showBlockchainOverlay) state.tabIdx = 2;
+                 else                                  state.tabIdx = 0;
                  auto base = vbox({
                      hbox({text(" SecureMsg ") | bold, filler(),
                            state.localUser
@@ -1186,17 +1296,24 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                                        + "] ") |
                                   dim)
                                : text(""),
-                           text(" [Ctrl+K] identity  [Ctrl+M] select member  [Ctrl+Q] quit ") | dim}) |
+                           text(" [Ctrl+K] identity  [Ctrl+B] blockchain  [Ctrl+M] member  [Ctrl+Q] quit ") | dim}) |
                          bgcolor(Color::Blue),
                      split->Render() | flex,
                  });
-                 if (!state.showIdentityOverlay)
-                   return base;
-                 return dbox({base, overlayComp->Render()});
+                 if (state.showIdentityOverlay)
+                   return dbox({base, overlayComp->Render()});
+                 if (state.showBlockchainOverlay)
+                   return dbox({base, chainOverlayComp->Render()});
+                 return base;
                }),
       [&](const Event &e) {
         if (e == Event::Special("\x0b")) { // Ctrl+K — open identity overlay
           openIdentityOverlay(state);
+          scr.PostEvent(Event::Custom);
+          return true;
+        }
+        if (e == Event::Special("\x02")) { // Ctrl+B — open blockchain overlay
+          state.showBlockchainOverlay = !state.showBlockchainOverlay;
           scr.PostEvent(Event::Custom);
           return true;
         }

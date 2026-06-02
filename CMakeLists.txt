@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(OPENSSL_ROOT_DIR /usr/local/openssl-3.5)
+set(OPENSSL_USE_STATIC_LIBS FALSE)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
@@ -14,7 +16,9 @@ if(TARGET SQLite::SQLite3 AND NOT TARGET SQLite3::SQLite3)
 elseif(TARGET SQLite3::SQLite3 AND NOT TARGET SQLite::SQLite3)
     add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
 endif()
-find_package(SqliteOrm QUIET)
+find_package(SqliteOrm QUIET PATHS
+    ${CMAKE_BINARY_DIR}
+    /run/host/usr/share/cmake)
 if(NOT TARGET sqlite_orm::sqlite_orm)
     include(FetchContent)
     FetchContent_Declare(sqlite_orm
@@ -162,11 +166,17 @@ target_sources(securemsg_main_logic PUBLIC
     FILE_SET CXX_MODULES FILES src/main_logic.cppm)
 target_compile_options(securemsg_main_logic PRIVATE -Wall -Wextra)
 
+# ── Blockchain manager ────────────────────────────────────────────────────────
+add_library(securemsg_blockchain STATIC src/BlockchainManager.cpp)
+target_include_directories(securemsg_blockchain PUBLIC src)
+target_link_libraries(securemsg_blockchain PUBLIC nlohmann_json::nlohmann_json CURL::libcurl)
+
 # ── Main binary ───────────────────────────────────────────────────────────────
 add_executable(securemsg src/main.cpp)
 target_link_libraries(securemsg PRIVATE
     securemsg_models securemsg_crypto securemsg_network securemsg_messaging
-    securemsg_main_logic ftxui::screen ftxui::dom ftxui::component)
+    securemsg_main_logic securemsg_blockchain
+    ftxui::screen ftxui::dom ftxui::component)
 target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
