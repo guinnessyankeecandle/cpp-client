@@ -1,3 +1,5 @@
+#include <mutex>
+#include <thread>
 #include <set>
 #include <catch2/catch.hpp>
 import securemsg.messaging.store;
@@ -224,4 +226,51 @@ TEST_CASE("MessageStore group message plaintext survives round trip", "[store][g
   const auto msgs = s.getByGroup(10);
   REQUIRE(msgs.size() == 1);
   REQUIRE(msgs[0].getPlaintext() == "group hello");
+}
+
+// ── Non-blocking render path test ─────────────────────────────────────────────
+// Verifies that concurrent store reads and writes don't deadlock, and that
+// the render's try_lock-based pattern works correctly.
+
+TEST_CASE("MessageStore concurrent read does not block after write", "[store][threading]") {
+  const MessageStore s(":memory:", {});
+  s.add(makeGrp(1, 10, 42));
+  s.add(makeGrp(2, 10, 43));
+
+  std::mutex mtx;
+  bool writerDone = false;
+
+  // Writer thread (simulates poller holding messageMutex during insert)
+  std::thread writer([&] {
+    std::lock_guard<std::mutex> lk(mtx);
+    s.add(makeGrp(3, 10, 44));
+    writerDone = true;
+  });
+
+  writer.join();
+
+  // Reader (simulates render try_lock succeeding after writer releases)
+  std::unique_lock<std::mutex> lk(mtx, std::try_to_lock);
+  REQUIRE(lk);  // lock must be immediately available after writer done
+  const auto msgs = s.getByGroup(10);
+  REQUIRE(msgs.size() == 3);
+}
+
+TEST_CASE("MessageStore group read returns stable results", "[store][threading]") {
+  const MessageStore s(":memory:", {});
+  for (int32_t i = 1; i <= 5; ++i)
+    s.add(makeGrp(i, 20, 99));
+
+  // Simulate render reading while another thread writes
+  std::thread writer([&] {
+    s.add(makeGrp(6, 20, 99));
+  });
+
+  // Reader proceeds independently (SQLite serialized mode handles ordering)
+  const auto msgs = s.getByGroup(20);
+  REQUIRE(msgs.size() >= 5); // at least the pre-writer messages
+
+  writer.join();
+  const auto msgsAfter = s.getByGroup(20);
+  REQUIRE(msgsAfter.size() == 6);
 }

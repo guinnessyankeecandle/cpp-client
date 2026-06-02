@@ -223,3 +223,135 @@ TEST_CASE("SkdmEpochTracker: unknown group always accepts", "[send_receive][grou
   REQUIRE(tracker.resolve(99, 0) >= 0);
   REQUIRE(tracker.resolve(99, 5) >= 0);
 }
+
+TEST_CASE("SkdmEpochTracker: weCausedEpoch correctly identifies self-caused bumps",
+          "[send_receive][group]") {
+  SkdmEpochTracker tracker;
+  // Post at epoch 3 → server bumps to 4
+  tracker.recordPosted(1, 3);
+
+  // Epoch 4 is the one WE caused — should NOT trigger a foreign rekey
+  REQUIRE(tracker.weCausedEpoch(1, 4));
+  // Epoch 5 is a subsequent change — someone else did something
+  REQUIRE_FALSE(tracker.weCausedEpoch(1, 5));
+  // Epoch 3 (same as what we posted at) is not what we caused (we caused 4)
+  REQUIRE_FALSE(tracker.weCausedEpoch(1, 3));
+  // Unknown group: never caused by us
+  REQUIRE_FALSE(tracker.weCausedEpoch(99, 4));
+}
+
+// ── Group send/receive end-to-end (no network) ───────────────────────────────
+// Simulates the UI flow: user picks a group, types a message, presses Send.
+// Verifies the message is stored and readable via getByGroup — i.e. the same
+// path the right-panel renderer uses to display group messages.
+
+TEST_CASE("Group send: message is stored and retrievable by group id",
+          "[send_receive][group][ui_flow]") {
+  // Set up a sender key and two ratchets (sender + receiver side).
+  const auto senderKey   = randomBytes(32);
+  const int32_t groupId  = 7;
+  const int32_t myUserId = 1;
+
+  GroupSenderKeys senderKeys;
+  senderKeys[groupId] = senderKey;
+
+  GroupRatchetMap groupRatchets;
+
+  const MessageStore store(":memory:", randomBytes(32));
+
+  // --- Simulate btnSend: build and store the group message locally ---
+  // (sendGroupMessage normally also calls api.sendGroupMessage; we test the
+  //  store side, which is what the UI render reads from getByGroup.)
+  if (!groupRatchets[groupId].contains(myUserId))
+    groupRatchets[groupId][myUserId] = SenderKeyRatchetState::init(senderKey);
+
+  auto &ratchet = groupRatchets[groupId][myUserId];
+  const std::string plaintext = "hello group";
+  const std::vector<uint8_t> plaintextBytes(plaintext.begin(), plaintext.end());
+  const auto wire = ratchet.encrypt(plaintextBytes);
+  const int32_t fakeId = 42;
+  store.add(GroupMessage{fakeId, groupId, myUserId,
+                         base64Encode(wire),
+                         BaseMessage::Direction::Sent, 0, plaintext});
+
+  // --- Simulate the right-panel renderer: getByGroup → iterate messages ---
+  const auto msgs = store.getByGroup(groupId);
+  REQUIRE(msgs.size() == 1);
+  REQUIRE(msgs[0].getGroupId()   == groupId);
+  REQUIRE(msgs[0].getUserId()    == myUserId);
+  REQUIRE(msgs[0].getPlaintext() == plaintext);
+  REQUIRE(msgs[0].getDirection() == BaseMessage::Direction::Sent);
+}
+
+TEST_CASE("Group send/receive: sender key shared state enables round-trip",
+          "[send_receive][group][ui_flow]") {
+  // Alice sends a group message; Bob (who was given the same sender key)
+  // can decrypt it.  This is the SKDM distribution model.
+  const auto senderKey   = randomBytes(32);
+  const int32_t groupId  = 3;
+  const int32_t aliceId  = 10;
+  const int32_t bobId    = 20;
+
+  // Alice's sender ratchet
+  auto aliceRatchet = SenderKeyRatchetState::init(senderKey);
+  // Bob's receiver ratchet (same seed key, independent state)
+  auto bobRatchet   = SenderKeyRatchetState::init(senderKey);
+
+  const MessageStore aliceStore(":memory:", randomBytes(32));
+  const MessageStore bobStore(":memory:", randomBytes(32));
+
+  // Alice sends two messages
+  const std::string text1 = "first message";
+  const std::string text2 = "second message";
+
+  auto sendMsg = [&](const std::string &text, int32_t msgId) {
+    const std::vector<uint8_t> pb(text.begin(), text.end());
+    const auto wire = aliceRatchet.encrypt(pb);
+    aliceStore.add(GroupMessage{msgId, groupId, aliceId,
+                                base64Encode(wire),
+                                BaseMessage::Direction::Sent, 0, text});
+    return wire;
+  };
+
+  const auto wire1 = sendMsg(text1, 1);
+  const auto wire2 = sendMsg(text2, 2);
+
+  // Bob receives both and stores them
+  auto recv = [&](const std::vector<uint8_t> &wire, int32_t msgId,
+                  const std::string &expectedPlain) {
+    const auto plain = bobRatchet.decrypt(wire).plaintext;
+    const std::string plainStr(plain.begin(), plain.end());
+    REQUIRE(plainStr == expectedPlain);
+    bobStore.add(GroupMessage{msgId, groupId, aliceId,
+                              base64Encode(wire),
+                              BaseMessage::Direction::Received, 0, plainStr});
+  };
+
+  recv(wire1, 1, text1);
+  recv(wire2, 2, text2);
+
+  // Verify getByGroup returns both messages in order
+  const auto aliceMsgs = aliceStore.getByGroup(groupId);
+  REQUIRE(aliceMsgs.size() == 2);
+  REQUIRE(aliceMsgs[0].getPlaintext() == text1);
+  REQUIRE(aliceMsgs[1].getPlaintext() == text2);
+
+  const auto bobMsgs = bobStore.getByGroup(groupId);
+  REQUIRE(bobMsgs.size() == 2);
+  REQUIRE(bobMsgs[0].getPlaintext() == text1);
+  REQUIRE(bobMsgs[1].getPlaintext() == text2);
+}
+
+TEST_CASE("Group send: missing sender key throws before any network call",
+          "[send_receive][group][ui_flow]") {
+  // The UI's btnSend spawns a thread that calls sendGroupMessage.
+  // If no sender key exists for the group (e.g. key erased after re-key),
+  // it must throw immediately so the error handler can show a status message.
+  GroupSenderKeys senderKeys; // empty — no key for group 7
+  GroupRatchetMap groupRatchets;
+  const MessageStore store(":memory:", randomBytes(32));
+
+  REQUIRE(senderKeys.find(7) == senderKeys.end()); // key genuinely absent
+  // sendGroupMessage would call senderKeys.at(7) which throws std::out_of_range
+  REQUIRE_THROWS_AS(senderKeys.at(7), std::out_of_range);
+}

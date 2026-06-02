@@ -158,23 +158,31 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
   return {msgId};
 }
 
-export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
-                                  const MessageStore &store,
-                                  const std::string &accessToken,
-                                  const RawKeyPair &myIkX,
-                                  const RawKeyPair &mySpk,
-                                  const std::vector<RawKeyPair> &myOpks,
-                                  const RawKeyPair &myPq, LocalUser &localUser,
-                                  const std::string &passphrase) {
-  auto messages = api.listMessages(accessToken);
+// ── Split fetch/process API ───────────────────────────────────────────────────
+//
+// Each receive operation is split into two phases so that HTTP calls (slow)
+// are separate from crypto+store operations (fast).  The caller holds
+// messageMutex only during the process phase, giving the render thread a
+// chance to acquire the lock between groups.
+
+// Process pre-fetched direct messages. Returns IDs to acknowledge via API.
+// Caller must hold messageMutex.
+export std::vector<int32_t>
+processDirectMessages(const nlohmann::json &messages,
+                      RatchetMap &ratchets, const MessageStore &store,
+                      const RawKeyPair &myIkX, const RawKeyPair &mySpk,
+                      const std::vector<RawKeyPair> &myOpks,
+                      const RawKeyPair &myPq, LocalUser &localUser,
+                      const std::string &passphrase) {
+  std::vector<int32_t> toAck;
   if (!messages.is_array())
-    return;
+    return toAck;
 
   for (const auto &msg : messages) {
     if (!msg.contains("id") || !msg.contains("sender_id") ||
         !msg.contains("ciphertext") || !msg.contains("ratchet_header_enc"))
       throw std::runtime_error(
-          "receiveDirectMessages: malformed message from server");
+          "processDirectMessages: malformed message from server");
 
     const int32_t id = msg.at("id").get<int32_t>();
     const int32_t otherUserId = msg.at("sender_id").get<int32_t>();
@@ -223,8 +231,6 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
       continue;
     }
 
-    // Strip the flag byte (and PQXDH prefix if initial) to get the encrypted
-    // header
     const std::ptrdiff_t prefixLen =
         !isInitial ? PQXDH_FLAG_BYTES : PQXDH_PREFIX_BYTES;
     std::vector encHeader(rawHeader.begin() + prefixLen, rawHeader.end());
@@ -240,10 +246,70 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
                         msg.at("ratchet_header_enc").get<std::string>(),
                         BaseMessage::Direction::Received, tsMs,
                         std::string(plain.begin(), plain.end())});
-      api.acknowledgeReceipt(accessToken, id);
+      toAck.push_back(id);
     } catch (...) {
     }
   }
+  return toAck;
+}
+
+// Apply pre-fetched SKDMs to group ratchets. Caller must hold messageMutex.
+// Process pre-fetched group messages. Returns {groupId, msgId} pairs to ack.
+// Caller must hold messageMutex.
+export std::vector<std::pair<int32_t, int32_t>>
+processGroupMessages(const nlohmann::json &msgs,
+                     GroupRatchetMap &groupRatchets, const MessageStore &store,
+                     const int32_t myUserId, const int32_t groupId) {
+  std::vector<std::pair<int32_t, int32_t>> toAck;
+  if (!msgs.is_array())
+    return toAck;
+
+  for (const auto &m : msgs) {
+    if (!m.contains("id") || !m.contains("sender_id") ||
+        !m.contains("ciphertext") || !m.contains("epoch"))
+      throw std::runtime_error(
+          "processGroupMessages: malformed message from server");
+
+    const int32_t id = m.at("id").get<int32_t>();
+    const int32_t senderId = m.at("sender_id").get<int32_t>();
+    if (senderId == myUserId)
+      continue;
+    if (store.containsGroup(groupId, id))
+      continue;
+    if (!groupRatchets.contains(groupId) ||
+        !groupRatchets.at(groupId).contains(senderId))
+      continue;
+
+    try {
+      auto &ratchet = groupRatchets.at(groupId).at(senderId);
+      auto wire = base64Decode(m.at("ciphertext").get<std::string>());
+      auto [plain] = ratchet.decrypt(wire);
+      store.add(GroupMessage{id, groupId, senderId,
+                             m.at("ciphertext").get<std::string>(),
+                             BaseMessage::Direction::Received, nowMs(),
+                             std::string(plain.begin(), plain.end())});
+      toAck.emplace_back(groupId, id);
+    } catch (...) {
+    }
+  }
+  return toAck;
+}
+
+// Legacy combined functions kept for callers that don't need the split.
+export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
+                                  const MessageStore &store,
+                                  const std::string &accessToken,
+                                  const RawKeyPair &myIkX,
+                                  const RawKeyPair &mySpk,
+                                  const std::vector<RawKeyPair> &myOpks,
+                                  const RawKeyPair &myPq, LocalUser &localUser,
+                                  const std::string &passphrase) {
+  const auto messages = api.listMessages(accessToken);
+  const auto toAck = processDirectMessages(messages, ratchets, store,
+                                           myIkX, mySpk, myOpks, myPq,
+                                           localUser, passphrase);
+  for (const int32_t id : toAck)
+    api.acknowledgeReceipt(accessToken, id);
 }
 
 // SKDM epoch tracking
@@ -265,6 +331,13 @@ public:
       return incomingEpoch;
 
     return -1; // stale — our posted epoch wins
+  }
+
+  // True when the epoch change was triggered by our own postSkdm call.
+  [[nodiscard]] bool weCausedEpoch(const int32_t groupId,
+                                   const int32_t epoch) const {
+    const auto it = m_postedEpoch.find(groupId);
+    return it != m_postedEpoch.end() && epoch == it->second;
   }
 
 private:
@@ -328,6 +401,39 @@ decryptSkdmPayload(const std::vector<uint8_t> &payload, const RawKeyPair &myIkX,
   return senderKey;
 }
 
+// Apply pre-fetched SKDMs to group ratchets. Caller must hold messageMutex.
+export void applySkdms(const nlohmann::json &skdms,
+                       const int32_t groupId,
+                       const RawKeyPair &myIkX, const RawKeyPair &mySpk,
+                       const std::vector<RawKeyPair> &myOpks,
+                       const RawKeyPair &myPq,
+                       GroupRatchetMap &groupRatchets,
+                       const SkdmEpochTracker &tracker) {
+  if (!skdms.is_array())
+    return;
+
+  for (const auto &entry : skdms) {
+    if (!entry.contains("sender_id") || !entry.contains("epoch") ||
+        !entry.contains("skdm_ciphertext"))
+      continue;
+
+    const int32_t senderId = entry.at("sender_id").get<int32_t>();
+    const int32_t epoch = entry.at("epoch").get<int32_t>();
+
+    if (tracker.resolve(groupId, epoch) < 0)
+      continue;
+
+    try {
+      const auto payload =
+          base64Decode(entry.at("skdm_ciphertext").get<std::string>());
+      auto senderKey = decryptSkdmPayload(payload, myIkX, mySpk, myOpks, myPq);
+      groupRatchets[groupId][senderId] = SenderKeyRatchetState::init(senderKey);
+      OPENSSL_cleanse(senderKey.data(), senderKey.size());
+    } catch (...) {
+    }
+  }
+}
+
 export void
 postGroupSenderKey(const ApiClient &api, const std::string &accessToken,
                    const int32_t groupId, const std::vector<int32_t> &memberIds,
@@ -350,35 +456,25 @@ postGroupSenderKey(const ApiClient &api, const std::string &accessToken,
   tracker.recordPosted(groupId, epoch);
 }
 
+// Legacy combined wrappers — fetch + process in one call.
 export void fetchAndApplySkdms(
     const ApiClient &api, const std::string &accessToken, const int32_t groupId,
     const RawKeyPair &myIkX, const RawKeyPair &mySpk,
     const std::vector<RawKeyPair> &myOpks, const RawKeyPair &myPq,
     GroupRatchetMap &groupRatchets, const SkdmEpochTracker &tracker) {
   const auto skdms = api.fetchSkdm(accessToken, groupId);
-  if (!skdms.is_array())
-    return;
+  applySkdms(skdms, groupId, myIkX, mySpk, myOpks, myPq, groupRatchets, tracker);
+}
 
-  for (const auto &entry : skdms) {
-    if (!entry.contains("sender_id") || !entry.contains("epoch") ||
-        !entry.contains("skdm_ciphertext"))
-      continue;
-
-    const int32_t senderId = entry.at("sender_id").get<int32_t>();
-    const int32_t epoch = entry.at("epoch").get<int32_t>();
-
-    if (tracker.resolve(groupId, epoch) < 0)
-      continue; // stale — our posted epoch wins
-
-    try {
-      const auto payload =
-          base64Decode(entry.at("skdm_ciphertext").get<std::string>());
-      auto senderKey = decryptSkdmPayload(payload, myIkX, mySpk, myOpks, myPq);
-      groupRatchets[groupId][senderId] = SenderKeyRatchetState::init(senderKey);
-      OPENSSL_cleanse(senderKey.data(), senderKey.size());
-    } catch (...) {
-    }
-  }
+export void
+receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRatchets,
+                     const MessageStore &store, const std::string &accessToken,
+                     const int32_t groupId, const int32_t myUserId) {
+  const auto msgs = api.listGroupMessages(accessToken, groupId);
+  const auto toAck = processGroupMessages(msgs, groupRatchets, store,
+                                          myUserId, groupId);
+  for (const auto &[gid, id] : toAck)
+    api.acknowledgeGroupReceipt(accessToken, gid, id);
 }
 
 export SendResult
@@ -415,40 +511,3 @@ sendGroupMessage(const ApiClient &api, const GroupSenderKeys &senderKeys,
   return {msgId};
 }
 
-export void
-receiveGroupMessages(const ApiClient &api, GroupRatchetMap &groupRatchets,
-                     const MessageStore &store, const std::string &accessToken,
-                     const int32_t groupId, const int32_t myUserId) {
-  auto msgs = api.listGroupMessages(accessToken, groupId);
-  if (!msgs.is_array())
-    return;
-
-  for (const auto &m : msgs) {
-    if (!m.contains("id") || !m.contains("sender_id") ||
-        !m.contains("ciphertext") || !m.contains("epoch"))
-      throw std::runtime_error(
-          "receiveGroupMessages: malformed message from server");
-
-    const int32_t id = m.at("id").get<int32_t>();
-    const int32_t senderId = m.at("sender_id").get<int32_t>();
-    if (senderId == myUserId)
-      continue; // don't store messages we sent
-    if (store.containsGroup(groupId, id))
-      continue;
-    if (!groupRatchets.contains(groupId) ||
-        !groupRatchets.at(groupId).contains(senderId))
-      continue; // no ratchet for this sender yet
-
-    try {
-      auto &ratchet = groupRatchets.at(groupId).at(senderId);
-      auto wire = base64Decode(m.at("ciphertext").get<std::string>());
-      auto [plain] = ratchet.decrypt(wire);
-      store.add(GroupMessage{id, groupId, senderId,
-                             m.at("ciphertext").get<std::string>(),
-                             BaseMessage::Direction::Received, nowMs(),
-                             std::string(plain.begin(), plain.end())});
-      api.acknowledgeGroupReceipt(accessToken, groupId, id);
-    } catch (...) {
-    }
-  }
-}

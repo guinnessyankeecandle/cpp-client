@@ -5,17 +5,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(OPENSSL_ROOT_DIR /usr/local/openssl-3.5)
-set(OPENSSL_USE_STATIC_LIBS FALSE)
+if(EXISTS /usr/local/openssl-3.5)
+    set(OPENSSL_ROOT_DIR /usr/local/openssl-3.5)
+    set(OPENSSL_USE_STATIC_LIBS FALSE)
+endif()
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
-find_package(SQLite3 REQUIRED)
+find_package(SQLite3 QUIET)
 # Normalise SQLite3 target name — Conan uses SQLite::SQLite3, system CMake uses SQLite3::SQLite3
 if(TARGET SQLite::SQLite3 AND NOT TARGET SQLite3::SQLite3)
     add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
 elseif(TARGET SQLite3::SQLite3 AND NOT TARGET SQLite::SQLite3)
     add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
 endif()
+# find_package targets from Conan may not carry the link library — use find_library as ground truth
+find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
 find_package(SqliteOrm QUIET PATHS
     ${CMAKE_BINARY_DIR}
     /run/host/usr/share/cmake)
@@ -151,12 +155,20 @@ target_sources(securemsg_messaging PUBLIC
         src/messaging/store.cppm
         src/messaging/send_receive.cppm
         src/messaging/messaging.cppm)
-target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm)
-# Resolve sqlite_orm include dir at configure time so clang-scan-deps sees it during module scanning.
-# Generator expressions are not expanded for the module scan command, so we must use a concrete path.
-get_target_property(_sqlite_orm_inc sqlite_orm::sqlite_orm INTERFACE_INCLUDE_DIRECTORIES)
-if(_sqlite_orm_inc)
-    target_include_directories(securemsg_messaging PUBLIC ${_sqlite_orm_inc})
+target_link_libraries(securemsg_messaging PUBLIC securemsg_crypto securemsg_network securemsg_models sqlite_orm::sqlite_orm ${SQLITE3_LIB})
+# Resolve the sqlite_orm include dir at configure time so clang-scan-deps can find the header
+# during C++ module scanning (generator expressions are not expanded in the scan command).
+# Search FetchContent source dir first, then fall back to find_path (which honours CMAKE_PREFIX_PATH
+# set by Conan's toolchain, so it works in both local and CI builds).
+if(DEFINED sqlite_orm_SOURCE_DIR)
+    target_include_directories(securemsg_messaging PUBLIC
+        "${sqlite_orm_SOURCE_DIR}/include"
+        "${sqlite_orm_SOURCE_DIR}")
+else()
+    find_path(_sqlite_orm_inc sqlite_orm/sqlite_orm.h)
+    if(_sqlite_orm_inc)
+        target_include_directories(securemsg_messaging PUBLIC "${_sqlite_orm_inc}")
+    endif()
 endif()
 target_compile_options(securemsg_messaging PRIVATE -Wall -Wextra)
 
