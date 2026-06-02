@@ -80,6 +80,24 @@ if(NOT Catch2_FOUND)
     FetchContent_MakeAvailable(Catch2)
 endif()
 
+# ── Python (for pysrp embedding) ─────────────────────────────────────────────
+find_program(Python3_EXECUTABLE NAMES python3)
+if(NOT Python3_EXECUTABLE)
+    message(FATAL_ERROR "python3 not found — required for SRP via pysrp")
+endif()
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+        "import sysconfig; print(sysconfig.get_path('include'))"
+    OUTPUT_VARIABLE _py_inc OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 10)
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+        "import sysconfig; d=sysconfig.get_config_var; print(d('LIBDIR') + '/' + d('LDLIBRARY'))"
+    OUTPUT_VARIABLE _py_lib OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 10)
+# Also add Flatpak host paths so CLion's bundled CMake indexer finds Python.h
+list(APPEND _py_inc_dirs "${_py_inc}")
+string(REPLACE "/usr/" "/run/host/usr/" _py_inc_host "${_py_inc}")
+list(APPEND _py_inc_dirs "${_py_inc_host}")
+
 # ── Crypto ────────────────────────────────────────────────────────────────────
 add_library(securemsg_crypto)
 target_sources(securemsg_crypto PUBLIC
@@ -95,11 +113,8 @@ target_sources(securemsg_crypto PUBLIC
         src/crypto/keystore.cppm
         src/crypto/srp.cppm
         src/crypto/crypto.cppm)
-target_include_directories(securemsg_crypto PUBLIC
-    /usr/include/python3.14
-    /run/host/usr/include/python3.14)
-target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto
-    /usr/lib64/libpython3.14.so)
+target_include_directories(securemsg_crypto PUBLIC ${_py_inc_dirs})
+target_link_libraries(securemsg_crypto PUBLIC OpenSSL::SSL OpenSSL::Crypto "${_py_lib}")
 target_compile_options(securemsg_crypto PRIVATE -Wall -Wextra)
 
 # ── Models ────────────────────────────────────────────────────────────────────
