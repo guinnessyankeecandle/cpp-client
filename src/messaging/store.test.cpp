@@ -171,3 +171,57 @@ TEST_CASE("MessageStore different keys produce independent stores", "[store]") {
   REQUIRE(m2.size() == 1);
   REQUIRE(m2[0].getPlaintext() == "user2 msg");
 }
+
+// ── Group message store tests ─────────────────────────────────────────────────
+
+static GroupMessage makeGrp(const int32_t id, const int32_t groupId,
+                             const int32_t senderId) {
+  return {id, groupId, senderId, "ct", BaseMessage::Direction::Received, 0, "msg"};
+}
+
+TEST_CASE("MessageStore group add and retrieve", "[store][group]") {
+  const MessageStore s(":memory:", {});
+  s.add(makeGrp(1, 10, 42));
+  s.add(makeGrp(2, 10, 43));
+  const auto msgs = s.getByGroup(10);
+  REQUIRE(msgs.size() == 2);
+}
+
+TEST_CASE("MessageStore group messages isolated by group id", "[store][group]") {
+  const MessageStore s(":memory:", {});
+  s.add(makeGrp(1, 10, 42));
+  s.add(makeGrp(2, 20, 42));
+  REQUIRE(s.getByGroup(10).size() == 1);
+  REQUIRE(s.getByGroup(20).size() == 1);
+  REQUIRE(s.getByGroup(99).empty());
+}
+
+TEST_CASE("MessageStore group containsGroup deduplicates", "[store][group]") {
+  const MessageStore s(":memory:", {});
+  s.add(makeGrp(1, 10, 42));
+  REQUIRE(s.containsGroup(10, 1));
+  REQUIRE_FALSE(s.containsGroup(10, 2));
+  // Adding same message again should be ignored
+  s.add(makeGrp(1, 10, 42));
+  REQUIRE(s.getByGroup(10).size() == 1);
+}
+
+TEST_CASE("MessageStore removeGroupMessage", "[store][group]") {
+  const MessageStore s(":memory:", {});
+  s.add(makeGrp(1, 10, 42));
+  s.add(makeGrp(2, 10, 42));
+  s.removeGroupMessage(10, 1);
+  const auto msgs = s.getByGroup(10);
+  REQUIRE(msgs.size() == 1);
+  REQUIRE(msgs[0].getId() == 2);
+}
+
+TEST_CASE("MessageStore group message plaintext survives round trip", "[store][group]") {
+  const auto key = randomBytes(32);
+  const MessageStore s(":memory:", key);
+  const GroupMessage m{1, 10, 42, "ct", BaseMessage::Direction::Received, 0, "group hello"};
+  s.add(m);
+  const auto msgs = s.getByGroup(10);
+  REQUIRE(msgs.size() == 1);
+  REQUIRE(msgs[0].getPlaintext() == "group hello");
+}

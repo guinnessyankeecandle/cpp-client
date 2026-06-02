@@ -90,6 +90,8 @@ struct AppState {
   std::string newGroupName;                    // input for new group name
   bool creatingGroup{false};                   // whether group creation mode is active
   std::set<int32_t> selectedGroupMembers;      // contacts selected for new group
+  std::string addGroupMemberUsername;          // input for adding member to existing group
+  int32_t selectedMemberIndex{-1};             // index of member selected for removal
   int menuSelected{0};  // selected index in contacts/groups menu
   int msgSelected{0};   // selected index in message list
   int splitPos{32};     // resizable split position
@@ -497,11 +499,16 @@ struct Poller {
                     lu.getKeyBundle().spk, lu.getKeyBundle().opks,
                     lu.getKeyBundle().pq, *state.localUser,
                     state.loginPassword);
-                // Receive group messages for all known groups
-                for (const auto &g : state.groups)
+                // Fetch SKDMs and receive messages for all known groups every poll
+                const auto &kb = lu.getKeyBundle();
+                for (const auto &g : state.groups) {
+                  fetchAndApplySkdms(api, lu.getAccessToken(), g.getId(),
+                                     kb.ikX, kb.spk, kb.opks, kb.pq,
+                                     state.groupRatchets, state.skdmTracker);
                   receiveGroupMessages(api, state.groupRatchets,
                                        *state.messageStore, lu.getAccessToken(),
                                        g.getId(), lu.getId());
+                }
               }
 
               // Auto-add any sender we've received a direct message from but
@@ -568,14 +575,9 @@ struct Poller {
                                              g.at("name").get<std::string>(),
                                              std::move(members), epoch);
 
-                    // Fetch sender keys from other members first
-                    const auto &kb = lu.getKeyBundle();
-                    fetchAndApplySkdms(api, lu.getAccessToken(), gid, kb.ikX,
-                                       kb.spk, kb.opks, kb.pq,
-                                       state.groupRatchets, state.skdmTracker);
-
                     // Only post our sender key if we still don't have one
                     if (!state.groupSenderKeys.contains(gid)) {
+                      const auto &kb = lu.getKeyBundle();
                       postGroupSenderKey(api, lu.getAccessToken(), gid,
                                          freshGroups.back().getMembers(),
                                          kb.ikX, state.groupSenderKeys,
@@ -803,6 +805,81 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     }
   });
 
+  auto addMemberInput = Input(&state.addGroupMemberUsername, "add member...");
+  addMemberInput |= CatchEvent([&](const Event &) {
+    std::erase(state.addGroupMemberUsername, '\n');
+    return false;
+  });
+
+  auto btnAddMember = Button(" + ", [&] {
+    if (!state.localUser || state.selectedGroupId < 0 ||
+        state.addGroupMemberUsername.empty())
+      return;
+    std::thread([&] {
+      try {
+        const auto res = api.lookupByUsername(
+            state.localUser->getAccessToken(), state.addGroupMemberUsername);
+        const int32_t uid = res.at("user_id").get<int32_t>();
+        const auto senderKey = state.groupSenderKeys.at(state.selectedGroupId);
+        const auto skdm = encryptSkdmForMember(
+            api, state.localUser->getAccessToken(), uid,
+            state.localUser->getKeyBundle().ikX, senderKey);
+        api.addGroupMember(state.localUser->getAccessToken(),
+                           state.selectedGroupId, uid, skdm);
+        state.addGroupMemberUsername.clear();
+        state.statusMsg = "Member added.";
+      } catch (const std::exception &e) {
+        state.statusMsg = std::string("Add member failed: ") + e.what();
+      }
+      state.msgsDirty = true;
+      scr.PostEvent(Event::Custom);
+    }).detach();
+  });
+
+  auto btnRemoveMember = Button(" Remove ", [&] {
+    if (!state.localUser || state.selectedGroupId < 0 ||
+        state.selectedMemberIndex < 0)
+      return;
+    const auto git = std::ranges::find_if(
+        state.groups,
+        [&](const auto &g) { return g.getId() == state.selectedGroupId; });
+    if (git == state.groups.end() ||
+        state.selectedMemberIndex >= static_cast<int>(git->getMembers().size()))
+      return;
+    const int32_t targetId = git->getMembers()[state.selectedMemberIndex];
+    std::thread([&, targetId] {
+      try {
+        // Build fresh SKDMs for all remaining members if we're the creator
+        const auto &members = [&] {
+          const auto g = std::ranges::find_if(state.groups, [&](const auto &gr) {
+            return gr.getId() == state.selectedGroupId;
+          });
+          return g != state.groups.end() ? g->getMembers() : std::vector<int32_t>{};
+        }();
+        std::map<int32_t, std::string> freshSkdms;
+        if (state.groupSenderKeys.contains(state.selectedGroupId)) {
+          auto newKey = randomBytes(KEY_BYTES);
+          for (const int32_t mid : members) {
+            if (mid == targetId || mid == state.localUser->getId()) continue;
+            freshSkdms[mid] = encryptSkdmForMember(
+                api, state.localUser->getAccessToken(), mid,
+                state.localUser->getKeyBundle().ikX, newKey);
+          }
+          state.groupSenderKeys[state.selectedGroupId] = newKey;
+          OPENSSL_cleanse(newKey.data(), newKey.size());
+        }
+        api.removeGroupMember(state.localUser->getAccessToken(),
+                              state.selectedGroupId, targetId, freshSkdms);
+        state.selectedMemberIndex = -1;
+        state.statusMsg = "Member removed.";
+      } catch (const std::exception &e) {
+        state.statusMsg = std::string("Remove failed: ") + e.what();
+      }
+      state.msgsDirty = true;
+      scr.PostEvent(Event::Custom);
+    }).detach();
+  });
+
   state.allLabels->clear();
 
   // allLabels: contacts first, then groups — no header items (use renderer for headers)
@@ -985,8 +1062,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       });
 
   const auto rightPanel = Renderer(
-      Container::Vertical({msgMenu, composeInput, btnSend, btnDelete}),
-      [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels] {
+      Container::Vertical({msgMenu, composeInput, btnSend, btnDelete,
+                           addMemberInput, btnAddMember, btnRemoveMember}),
+      [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels,
+       addMemberInput, btnAddMember, btnRemoveMember] {
         if (state.msgsDirty) {
           rebuildMsgLabels();
           state.msgsDirty = false;
@@ -1010,14 +1089,28 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                 hbox({composeInput->Render() | flex, btnSend->Render()}));
         }
         if (state.viewingGroup && state.selectedGroupId >= 0) {
-          // Show current group members
           const auto git = std::ranges::find_if(
               state.groups, [&](const auto &g) {
                 return g.getId() == state.selectedGroupId;
               });
-          if (git != state.groups.end() && !git->getMembers().empty()) {
+          if (git != state.groups.end()) {
             rows.emplace_back(separator());
-            rows.emplace_back(text(" Members: ") | dim);
+            rows.emplace_back(text(" Members:") | dim);
+            const auto &members = git->getMembers();
+            for (int i = 0; i < static_cast<int>(members.size()); ++i) {
+              const int32_t mid = members[i];
+              const bool selected = (state.selectedMemberIndex == i);
+              auto label = text("  " + usernameById(mid));
+              if (selected) label = label | inverted;
+              if (mid == state.localUser->getId()) label = label | dim;
+              rows.emplace_back(
+                  hbox({std::move(label) | flex,
+                        selected ? btnRemoveMember->Render() : text("") }));
+            }
+            rows.emplace_back(
+                hbox({addMemberInput->Render() | flex |
+                          size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
+                      btnAddMember->Render()}));
           }
         }
         if (!state.statusMsg.empty())
@@ -1093,7 +1186,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                                        + "] ") |
                                   dim)
                                : text(""),
-                           text(" [Ctrl+K] identity  [Ctrl+Q] quit ") | dim}) |
+                           text(" [Ctrl+K] identity  [Ctrl+M] select member  [Ctrl+Q] quit ") | dim}) |
                          bgcolor(Color::Blue),
                      split->Render() | flex,
                  });
@@ -1111,6 +1204,19 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           state.poller.reset();
           scr.ExitLoopClosure()();
           return true;
+        }
+        // Ctrl+M — cycle through group members for removal selection
+        if (e == Event::Special("\x0d") && state.viewingGroup &&
+            state.selectedGroupId >= 0) {
+          const auto git = std::ranges::find_if(
+              state.groups,
+              [&](const auto &g) { return g.getId() == state.selectedGroupId; });
+          if (git != state.groups.end() && !git->getMembers().empty()) {
+            const int n = static_cast<int>(git->getMembers().size());
+            state.selectedMemberIndex = (state.selectedMemberIndex + 1) % n;
+            scr.PostEvent(Event::Custom);
+            return true;
+          }
         }
         return false;
       });
