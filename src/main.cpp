@@ -86,7 +86,8 @@ struct AppState {
   std::mutex stateMutex;        // guards Poller→UI writes: contacts and groups
   std::mutex messageMutex;      // guards ratchets, groupRatchets, messageStore
   std::mutex usernameCacheMutex; // guards usernameCache — never held while acquiring the above
-  std::unordered_map<int32_t, std::string> usernameCache; // id → username, safe for all threads
+  std::unordered_map<int32_t, std::string> usernameCache;
+  bool labelsDirty{true}; // start true so first render picks up initial state // id → username, safe for all threads
 
   std::shared_ptr<std::vector<std::string>> allLabels =
       std::make_shared<std::vector<std::string>>();
