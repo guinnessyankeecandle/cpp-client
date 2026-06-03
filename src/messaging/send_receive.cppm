@@ -1,6 +1,7 @@
 module;
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <openssl/crypto.h>
 #include <optional>
@@ -14,6 +15,10 @@ import securemsg.network;
 import securemsg.messaging.message;
 import securemsg.messaging.store;
 import securemsg.models;
+
+static void recvLog(const std::string& msg) {
+  std::ofstream("securemsg.log", std::ios::app) << msg;
+}
 
 export using RatchetMap = std::unordered_map<int32_t, RatchetState>;
 // Keyed by groupId → per-sender ratchet: senderId → SenderKeyRatchetState
@@ -220,6 +225,9 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
       if (hdr.usedOpkPub)
         localUser.consumeOneTimePrekey(*hdr.usedOpkPub, passphrase);
     } else if (!ratchets.contains(otherUserId)) {
+      recvLog("[recv] msg id=" + std::to_string(id) +
+              " from sender=" + std::to_string(otherUserId) +
+              " skipped: non-initial message but no ratchet — initial handshake not received yet\n");
       continue;
     }
 
@@ -241,7 +249,14 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
                         BaseMessage::Direction::Received, tsMs,
                         std::string(plain.begin(), plain.end()), ratchetIdx});
       api.acknowledgeReceipt(accessToken, id);
+    } catch (const std::exception& ex) {
+      recvLog("[recv] msg id=" + std::to_string(id) +
+              " from sender=" + std::to_string(otherUserId) +
+              " decrypt FAILED: " + ex.what() + "\n");
     } catch (...) {
+      recvLog("[recv] msg id=" + std::to_string(id) +
+              " from sender=" + std::to_string(otherUserId) +
+              " decrypt FAILED: unknown exception\n");
     }
   }
 }

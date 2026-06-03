@@ -93,7 +93,8 @@ struct AppState {
   bool labelsDirty{true}; // start true so first render picks up initial state
   // Blockchain — per conversation segment tracking
   std::map<std::string, int> segmentExported;   // convId → segments already exported
-  std::string chainVerifyStatus;                // result shown in chat area // id → username, safe for all threads
+  std::string chainVerifyStatus;                // result shown in chat area
+  int cachedSentMsgCount{0};                    // updated by rebuildMsgLabels, read by render
   std::string exportSegNumInput;                // block number for manual segment export (1-based)
   bool menuMouseEvent{false};                   // set by left-panel CatchEvent; read by on_change
 
@@ -573,7 +574,12 @@ struct Poller {
                 scr.PostEvent(Event::Custom);
               }
 
-              for (const int32_t senderId : state.messageStore->getDirectSenderIds()) {
+              std::vector<int32_t> directSenderIds;
+              {
+                std::lock_guard<std::mutex> msgLock(state.messageMutex);
+                directSenderIds = state.messageStore->getDirectSenderIds();
+              }
+              for (const int32_t senderId : directSenderIds) {
                 if (senderId == lu.getId()) continue;
                 const bool known = std::ranges::any_of(state.contacts,
                     [senderId](const auto &c) { return c.getId() == senderId; });
@@ -842,15 +848,19 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       const std::string myName = state.localUser->getUsername();
       const std::string theirName = usernameById(state.selectedContactId);
       const auto directMsgs = state.messageStore->getByUser(state.selectedContactId);
+      int sentCount = 0;
       for (std::size_t i = 0; i < directMsgs.size(); ++i) {
         const auto &m = directMsgs[i];
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
+        if (mine) ++sentCount;
         msgLabels->emplace_back(" " + std::to_string(m.getRatchetIndex() + 1) + ". " +
                                 (mine ? myName : theirName) + ": " + m.getPlaintext());
         msgIds->emplace_back(m.getId());
         msgSent->emplace_back(mine);
       }
+      state.cachedSentMsgCount = sentCount;
     } else {
+      state.cachedSentMsgCount = 0;
       return;
     }
     if (state.msgIds->empty()) {
@@ -892,7 +902,6 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       struct PendingRecord {
         std::string segFile;
         int segIdx{0};
-        std::vector<MessageEnvelope> envs;
         SegmentDigest digest;
       };
       std::optional<PendingRecord> pending;
@@ -942,7 +951,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                   "  hash: " + digest.segmentHash.substr(0, 16) + "...";
               if (!state.ethPrivateKey.empty() && !state.ethContractAddr.empty()) {
                 state.chainVerifyStatus += "  submitting to Sepolia...";
-                pending = PendingRecord{segFile, segIdx, envs, std::move(digest)};
+                pending = PendingRecord{segFile, segIdx, std::move(digest)};
               } else {
                 state.chainVerifyStatus += "  (add eth_config.json to record on chain)";
               }
@@ -969,27 +978,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
               state.ethPrivateKey,
               state.ethRpcUrl,
               11155111);
-          // Fill in the post-tx fields so the proof packages are complete.
-          pending->digest.transactionHash   = txHash;
-          pending->digest.contractAddress   = state.ethContractAddr;
-          pending->digest.recordedTimestamp = static_cast<uint64_t>(std::time(nullptr));
-          pending->digest.chainId           = 11155111;
-          pending->digest.chainName         = "sepolia";
-          // recorder = Ethereum address derived from the private key (written by recordOnChain
-          // internally — approximate here as the contract address for the proof file).
-          pending->digest.recorder          = state.ethContractAddr;
-
-          const auto packages = BlockchainManager::buildProofPackages(
-              pending->envs, pending->digest);
-          const auto proofFile = BlockchainManager::writeProofPackagesFile(
-              packages, pending->digest.segmentId);
-
           state.chainVerifyStatus =
               "Block " + std::to_string(pending->segIdx) +
               " recorded  tx: " + txHash.substr(0, 18) + "..." +
-              "  proofs: " + proofFile;
+              "  file: " + pending->segFile;
           appendLog("[chain] block " + std::to_string(pending->segIdx) +
-                    " tx=" + txHash + " proofs=" + proofFile + "\n");
+                    " tx=" + txHash + "\n");
         } catch (const std::exception& ex) {
           state.chainVerifyStatus =
               "Block " + std::to_string(pending->segIdx) +
@@ -1405,8 +1399,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       const int idxHi = idxLo + 4;
 
       std::vector<Message> allMsgs;
-      if (!state.viewingGroup)
+      if (!state.viewingGroup) {
+        std::lock_guard<std::mutex> lk(state.messageMutex);
         allMsgs = state.messageStore->getByUser(state.selectedContactId);
+      }
 
       // Collect exactly the 5 messages whose ratchetIndex falls in [idxLo, idxHi].
       std::vector<Message> segMsgs;
@@ -1468,7 +1464,11 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       }
 
       const auto convId = currentConvId();
-      const auto msgs   = state.messageStore->getByUser(state.selectedContactId);
+      std::vector<Message> msgs;
+      {
+        std::lock_guard<std::mutex> lk(state.messageMutex);
+        msgs = state.messageStore->getByUser(state.selectedContactId);
+      }
 
       // Find the selected message.
       const Message *target = nullptr;
@@ -1619,11 +1619,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         // Show blockchain export/verify controls for direct conversations.
         if (inChat && !state.viewingGroup && state.localUser && state.messageStore) {
           // Block progress counts only SENT messages — one block = 5 messages you send.
-          const auto allUIMsgs = state.messageStore->getByUser(state.selectedContactId);
-          int sentCount = 0;
-          for (const auto &m : allUIMsgs)
-            if (m.getDirection() == BaseMessage::Direction::Sent)
-              ++sentCount;
+          // Use the count cached by rebuildMsgLabels to avoid a raw SQLite call during render.
+          const int sentCount        = state.cachedSentMsgCount;
           const int completedBlocks  = sentCount / 5;
           const int sentInBlock      = sentCount % 5; // 0 means just completed
           const bool latestReady     = completedBlocks > 0 && sentInBlock == 0;
@@ -1745,18 +1742,21 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         }
       };
 
-      if (state.viewingGroup && state.selectedGroupId >= 0) {
-        convLabel = "group-" + std::to_string(state.selectedGroupId);
-        addEnvs(state.messageStore->getByGroup(state.selectedGroupId), convLabel);
-      } else if (!state.viewingGroup && state.selectedContactId >= 0) {
-        convLabel = "direct-" +
-                    std::to_string(std::min(state.localUser->getId(),
-                                            state.selectedContactId)) +
-                    "-" + std::to_string(std::max(state.localUser->getId(),
-                                                   state.selectedContactId));
-        addEnvs(state.messageStore->getByUser(state.selectedContactId), convLabel);
-      } else {
-        state.chainStatus = "Select a conversation first."; return;
+      {
+        std::lock_guard<std::mutex> lk(state.messageMutex);
+        if (state.viewingGroup && state.selectedGroupId >= 0) {
+          convLabel = "group-" + std::to_string(state.selectedGroupId);
+          addEnvs(state.messageStore->getByGroup(state.selectedGroupId), convLabel);
+        } else if (!state.viewingGroup && state.selectedContactId >= 0) {
+          convLabel = "direct-" +
+                      std::to_string(std::min(state.localUser->getId(),
+                                              state.selectedContactId)) +
+                      "-" + std::to_string(std::max(state.localUser->getId(),
+                                                     state.selectedContactId));
+          addEnvs(state.messageStore->getByUser(state.selectedContactId), convLabel);
+        } else {
+          state.chainStatus = "Select a conversation first."; return;
+        }
       }
       if (state.chainLastEnvs.empty()) {
         state.chainStatus = "No messages in this conversation."; return;
