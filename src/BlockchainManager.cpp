@@ -8,6 +8,10 @@
 #include <fstream>
 #include <cstdio>
 #include <curl/curl.h>
+#include <openssl/ec.h>
+#include <openssl/ecdsa.h>
+#include <openssl/obj_mac.h>
+#include <openssl/bn.h>
 
 // ── Keccak-256 ────────────────────────────────────────────────────────────────
 //
@@ -432,6 +436,283 @@ std::string BlockchainManager::verifyOnChain(const nlohmann::json& pkg,
                    " proof=" + std::to_string(proofTs) + ")";
 
         return "OK: recorded by " + addrHex + " at " + std::to_string(ts);
+    } catch (const std::exception& ex) {
+        return std::string("FAIL: ") + ex.what();
+    }
+}
+
+// ── Ethereum transaction signing & submission ─────────────────────────────────
+
+namespace {
+
+// Big-endian minimal byte encoding (0 → empty; strips leading zero bytes)
+static std::vector<uint8_t> beMin(uint64_t v) {
+    if (v == 0) return {};
+    std::vector<uint8_t> out;
+    while (v) { out.insert(out.begin(), static_cast<uint8_t>(v & 0xFF)); v >>= 8; }
+    return out;
+}
+static std::vector<uint8_t> beMinBytes(std::vector<uint8_t> b) {
+    while (!b.empty() && b.front() == 0) b.erase(b.begin());
+    return b;
+}
+
+// RLP encode a byte string
+static std::vector<uint8_t> rlpB(const std::vector<uint8_t>& d) {
+    if (d.size() == 1 && d[0] < 0x80) return d;
+    std::vector<uint8_t> out;
+    if (d.size() <= 55) {
+        out.push_back(static_cast<uint8_t>(0x80 + d.size()));
+    } else {
+        auto lb = beMin(d.size());
+        out.push_back(static_cast<uint8_t>(0xb7 + lb.size()));
+        out.insert(out.end(), lb.begin(), lb.end());
+    }
+    out.insert(out.end(), d.begin(), d.end());
+    return out;
+}
+static std::vector<uint8_t> rlpU(uint64_t v)                      { return rlpB(beMin(v)); }
+static std::vector<uint8_t> rlpI(const std::vector<uint8_t>& b32) { return rlpB(beMinBytes({b32.begin(), b32.end()})); }
+
+// RLP encode a list of pre-encoded fields
+static std::vector<uint8_t> rlpL(const std::vector<std::vector<uint8_t>>& items) {
+    std::vector<uint8_t> payload;
+    for (const auto& f : items) payload.insert(payload.end(), f.begin(), f.end());
+    std::vector<uint8_t> out;
+    if (payload.size() <= 55) {
+        out.push_back(static_cast<uint8_t>(0xc0 + payload.size()));
+    } else {
+        auto lb = beMin(payload.size());
+        out.push_back(static_cast<uint8_t>(0xf7 + lb.size()));
+        out.insert(out.end(), lb.begin(), lb.end());
+    }
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+// Derive Ethereum address (20 bytes) from a 32-byte secp256k1 private key
+static std::vector<uint8_t> ethAddr(const std::vector<uint8_t>& priv32) {
+    BN_CTX* ctx = BN_CTX_new();
+    EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
+    BIGNUM* priv = BN_bin2bn(priv32.data(), 32, nullptr);
+    EC_POINT* pub = EC_POINT_new(grp);
+    EC_POINT_mul(grp, pub, priv, nullptr, nullptr, ctx);
+    std::vector<uint8_t> raw(65);
+    EC_POINT_point2oct(grp, pub, POINT_CONVERSION_UNCOMPRESSED, raw.data(), 65, ctx);
+    EC_POINT_free(pub); EC_GROUP_free(grp); BN_free(priv); BN_CTX_free(ctx);
+    auto h = BlockchainManager::keccak256(std::vector<uint8_t>(raw.begin() + 1, raw.end()));
+    return {h.begin() + 12, h.end()};
+}
+
+// Recover uncompressed pub key (64 bytes, no 0x04) from (hash, r, s, recId)
+static std::vector<uint8_t> ecRecover(
+    const std::vector<uint8_t>& h32,
+    const std::vector<uint8_t>& r32,
+    const std::vector<uint8_t>& s32,
+    int recId)
+{
+    BN_CTX* ctx = BN_CTX_new();
+    EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
+    const BIGNUM* n = EC_GROUP_get0_order(grp);
+
+    BIGNUM* r = BN_bin2bn(r32.data(), 32, nullptr);
+    BIGNUM* s = BN_bin2bn(s32.data(), 32, nullptr);
+    BIGNUM* e = BN_bin2bn(h32.data(), 32, nullptr);
+    BIGNUM* x = BN_dup(r);
+    if (recId >= 2) BN_add(x, x, n);
+
+    // y² = x³ + 7 mod p  (secp256k1, a=0 b=7)
+    BIGNUM* p = BN_new(); BIGNUM* a = BN_new(); BIGNUM* b = BN_new();
+    EC_GROUP_get_curve(grp, p, a, b, ctx);
+    BIGNUM* rhs = BN_new();
+    BN_mod_sqr(rhs, x, p, ctx);
+    BN_mod_mul(rhs, rhs, x, p, ctx);
+    BN_add_word(rhs, 7);
+    BN_nnmod(rhs, rhs, p, ctx);
+    // sqrt: exp = (p+1)/4 (works because p ≡ 3 mod 4 for secp256k1)
+    BIGNUM* exp2 = BN_dup(p); BN_add_word(exp2, 1);
+    BN_rshift1(exp2, exp2); BN_rshift1(exp2, exp2);
+    BIGNUM* y = BN_new();
+    BN_mod_exp(y, rhs, exp2, p, ctx);
+    if ((BN_is_odd(y) ? 1 : 0) != (recId & 1)) BN_sub(y, p, y);
+
+    EC_POINT* R = EC_POINT_new(grp);
+    EC_POINT_set_affine_coordinates(grp, R, x, y, ctx);
+
+    BIGNUM* rinv = BN_mod_inverse(nullptr, r, n, ctx);
+    BIGNUM* u1 = BN_new(); BIGNUM* u2 = BN_new();
+    BN_mod_mul(u1, e, rinv, n, ctx);
+    BN_sub(u1, n, u1); BN_nnmod(u1, u1, n, ctx); // u1 = -e*r^-1 mod n
+    BN_mod_mul(u2, s, rinv, n, ctx);               // u2 =  s*r^-1 mod n
+
+    EC_POINT* Q = EC_POINT_new(grp);
+    EC_POINT_mul(grp, Q, u1, R, u2, ctx);
+    std::vector<uint8_t> out(65);
+    EC_POINT_point2oct(grp, Q, POINT_CONVERSION_UNCOMPRESSED, out.data(), 65, ctx);
+
+    BN_free(r); BN_free(s); BN_free(e); BN_free(x);
+    BN_free(p); BN_free(a); BN_free(b); BN_free(rhs); BN_free(exp2); BN_free(y);
+    BN_free(rinv); BN_free(u1); BN_free(u2);
+    EC_POINT_free(R); EC_POINT_free(Q); EC_GROUP_free(grp); BN_CTX_free(ctx);
+    return {out.begin() + 1, out.end()};
+}
+
+// JSON-RPC POST helper (reuses curlWriteStr from above in this same anonymous namespace)
+static nlohmann::json ethRpc(const std::string& url, const nlohmann::json& req) {
+    std::string body = req.dump(), resp;
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("curl_easy_init failed");
+    curl_slist* hdr = curl_slist_append(nullptr, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdr);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteStr);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    // Point curl at the system CA bundle (OpenSSL 3.5 custom prefix has no certs)
+    curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt");
+    CURLcode rc = curl_easy_perform(curl);
+    curl_slist_free_all(hdr); curl_easy_cleanup(curl);
+    if (rc != CURLE_OK)
+        throw std::runtime_error(std::string("RPC: ") + curl_easy_strerror(rc));
+    auto j = nlohmann::json::parse(resp, nullptr, false);
+    if (j.is_discarded())
+        throw std::runtime_error("Invalid JSON from RPC (got: " +
+            (resp.size() > 120 ? resp.substr(0, 120) + "..." : resp) + ")");
+    if (j.contains("error")) throw std::runtime_error("RPC error: " + j["error"].dump());
+    return j.at("result");
+}
+
+} // anonymous namespace
+
+std::string BlockchainManager::recordOnChain(
+    const std::string& segmentHashHex,
+    const std::string& contractAddress,
+    const std::string& privateKeyHex,
+    const std::string& rpcUrl,
+    int chainId)
+{
+    try {
+        // Parse inputs
+        auto privKey = fromHex0x(privateKeyHex);
+        if (privKey.size() != 32) throw std::invalid_argument("Private key must be 32 bytes");
+        auto toAddr = fromHex0x(contractAddress);
+        if (toAddr.size() != 20) throw std::invalid_argument("Contract address must be 20 bytes");
+        auto hashBytes = fromHex0x(segmentHashHex);
+        if (hashBytes.size() != 32) throw std::invalid_argument("Segment hash must be 32 bytes");
+
+        // Derive sender address for nonce lookup
+        auto senderBytes = ethAddr(privKey);
+        std::ostringstream senderSS;
+        senderSS << "0x";
+        for (uint8_t b : senderBytes)
+            senderSS << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+        const std::string senderHex = senderSS.str();
+
+        // eth_getTransactionCount
+        nlohmann::json nonceReq;
+        nonceReq["jsonrpc"] = "2.0"; nonceReq["method"] = "eth_getTransactionCount";
+        nonceReq["params"] = nlohmann::json::array({senderHex, "pending"});
+        nonceReq["id"] = 1;
+        const auto nonceHex = ethRpc(rpcUrl, nonceReq).get<std::string>();
+        const uint64_t nonce = std::stoull(nonceHex.substr(2), nullptr, 16);
+
+        // eth_gasPrice with 20% tip
+        nlohmann::json gpReq;
+        gpReq["jsonrpc"] = "2.0"; gpReq["method"] = "eth_gasPrice";
+        gpReq["params"] = nlohmann::json::array(); gpReq["id"] = 2;
+        const auto gpHex = ethRpc(rpcUrl, gpReq).get<std::string>();
+        const uint64_t gasPrice = std::stoull(gpHex.substr(2), nullptr, 16) * 12 / 10;
+
+        // calldata: logAccess(bytes32) selector + hash
+        auto sel = keccak256(std::string("logAccess(bytes32)"));
+        std::vector<uint8_t> calldata(sel.begin(), sel.begin() + 4);
+        calldata.insert(calldata.end(), hashBytes.begin(), hashBytes.end());
+
+        constexpr uint64_t GAS_LIMIT = 80000;
+
+        // EIP-155 unsigned tx: [nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0]
+        auto rlpUnsigned = rlpL({
+            rlpU(nonce), rlpU(gasPrice), rlpU(GAS_LIMIT),
+            rlpB(toAddr), rlpU(0), rlpB(calldata),
+            rlpU(static_cast<uint64_t>(chainId)), rlpU(0), rlpU(0)
+        });
+        auto txHash = keccak256(rlpUnsigned);
+
+        // Sign with secp256k1
+        BN_CTX* ctx = BN_CTX_new();
+        EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
+        EC_KEY* key = EC_KEY_new();
+        EC_KEY_set_group(key, grp);
+        BIGNUM* privBn = BN_bin2bn(privKey.data(), 32, nullptr);
+        EC_KEY_set_private_key(key, privBn);
+        EC_POINT* pubPt = EC_POINT_new(grp);
+        EC_POINT_mul(grp, pubPt, privBn, nullptr, nullptr, ctx);
+        EC_KEY_set_public_key(key, pubPt);
+
+        ECDSA_SIG* sig = ECDSA_do_sign(txHash.data(), 32, key);
+        if (!sig) throw std::runtime_error("ECDSA_do_sign failed");
+
+        const BIGNUM* sigR = nullptr; const BIGNUM* sigS = nullptr;
+        ECDSA_SIG_get0(sig, &sigR, &sigS);
+        std::vector<uint8_t> rBytes(32), sBytes(32);
+        BN_bn2binpad(sigR, rBytes.data(), 32);
+        BN_bn2binpad(sigS, sBytes.data(), 32);
+
+        // EIP-2: low-s normalisation — OpenSSL does not enforce this automatically.
+        // If s > n/2, negate it: s = n - s. The recovery ID is recalculated below.
+        {
+            const BIGNUM* n_ord = EC_GROUP_get0_order(grp);
+            BIGNUM* half_n = BN_new();
+            BN_rshift1(half_n, n_ord);
+            if (BN_cmp(sigS, half_n) > 0) {
+                BIGNUM* ns = BN_new();
+                BN_sub(ns, n_ord, sigS);
+                BN_bn2binpad(ns, sBytes.data(), 32);
+                BN_free(ns);
+            }
+            BN_free(half_n);
+        }
+
+        // Determine recovery ID by checking which one reconstructs our address
+        int recId = -1;
+        for (int rid = 0; rid < 2; ++rid) {
+            auto recPub = ecRecover(txHash, rBytes, sBytes, rid);
+            auto recHash = keccak256(recPub);
+            if (std::equal(recHash.begin() + 12, recHash.end(), senderBytes.begin()))
+            { recId = rid; break; }
+        }
+        if (recId < 0) throw std::runtime_error("Recovery ID determination failed");
+
+        ECDSA_SIG_free(sig); EC_KEY_free(key); EC_GROUP_free(grp);
+        EC_POINT_free(pubPt); BN_free(privBn); BN_CTX_free(ctx);
+
+        // EIP-155 v = recId + chainId*2 + 35
+        const uint64_t v = static_cast<uint64_t>(recId) +
+                           static_cast<uint64_t>(chainId) * 2 + 35;
+
+        // Signed tx: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
+        auto rlpSigned = rlpL({
+            rlpU(nonce), rlpU(gasPrice), rlpU(GAS_LIMIT),
+            rlpB(toAddr), rlpU(0), rlpB(calldata),
+            rlpU(v), rlpI(rBytes), rlpI(sBytes)
+        });
+
+        // Hex-encode
+        std::ostringstream rawSS;
+        rawSS << "0x";
+        for (uint8_t b : rlpSigned)
+            rawSS << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+
+        // eth_sendRawTransaction
+        nlohmann::json sendReq;
+        sendReq["jsonrpc"] = "2.0"; sendReq["method"] = "eth_sendRawTransaction";
+        sendReq["params"] = nlohmann::json::array({rawSS.str()});
+        sendReq["id"] = 3;
+        return ethRpc(rpcUrl, sendReq).get<std::string>(); // tx hash
+
     } catch (const std::exception& ex) {
         return std::string("FAIL: ") + ex.what();
     }

@@ -60,6 +60,14 @@ public:
     static std::string verifyLocalHashes(const nlohmann::json& package);
     static std::string verifyOnChain(const nlohmann::json& package, const std::string& rpcUrl);
 
+    // Sign and submit the segment hash to the audit contract on Sepolia.
+    // Returns the transaction hash on success, or a "FAIL: ..." string on error.
+    static std::string recordOnChain(const std::string& segmentHashHex,
+                                     const std::string& contractAddress,
+                                     const std::string& privateKeyHex,
+                                     const std::string& rpcUrl,
+                                     int chainId = 11155111);
+
     static std::string              toHex0x(const std::vector<uint8_t>& data);
     static std::vector<uint8_t>     fromHex0x(const std::string& hex);
 };

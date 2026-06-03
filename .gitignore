@@ -31,4 +31,5 @@ cmake/
 
 # Runtime artifacts
 identity*.key
+eth_config.json
 docs/

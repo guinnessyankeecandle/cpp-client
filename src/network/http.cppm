@@ -107,8 +107,17 @@ public:
 
     SSL_CTX_set_min_proto_version(m_ctx.get(), TLS1_2_VERSION);
     SSL_CTX_set_verify(m_ctx.get(), SSL_VERIFY_PEER, nullptr);
-    if (SSL_CTX_set_default_verify_paths(m_ctx.get()) != 1)
-      throw std::runtime_error("SSL_CTX_set_default_verify_paths failed: " + sslError());
+    // OpenSSL 3.5 is built with a custom prefix so its default cert paths point
+    // to /usr/local/openssl-3.5/certs/ (empty). Load from known system locations.
+    const bool loaded =
+        SSL_CTX_load_verify_locations(m_ctx.get(), nullptr, "/etc/ssl/certs") == 1 ||
+        SSL_CTX_load_verify_locations(m_ctx.get(),
+            "/etc/ssl/certs/ca-certificates.crt", nullptr) == 1 ||
+        SSL_CTX_load_verify_locations(m_ctx.get(),
+            "/etc/pki/tls/certs/ca-bundle.crt", nullptr) == 1 ||
+        SSL_CTX_set_default_verify_paths(m_ctx.get()) == 1;
+    if (!loaded)
+      throw std::runtime_error("SSL: could not load CA certificates: " + sslError());
   }
 
   [[nodiscard]] nlohmann::json post(const std::string &path,

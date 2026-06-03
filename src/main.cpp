@@ -93,6 +93,11 @@ struct AppState {
   std::string chainVerifyStatus;                // result shown in chat area // id → username, safe for all threads
   std::string exportSegNumInput;                // block number for manual segment export (1-based)
 
+  // Ethereum config — loaded from eth_config.json on login
+  std::string ethPrivateKey;     // hex, with or without 0x prefix
+  std::string ethContractAddr;   // 0x-prefixed 20-byte address
+  std::string ethRpcUrl{"https://rpc.sepolia.org"};
+
   std::shared_ptr<std::vector<std::string>> allLabels =
       std::make_shared<std::vector<std::string>>();
   std::shared_ptr<std::vector<std::string>> msgLabels =
@@ -449,6 +454,23 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
         state.messageStore =
             MessageStore("messages_" + state.loginUsername + ".db",
                          state.localUser->getDbKey());
+        // Load Ethereum config if present
+        {
+          std::ifstream ethCfgFile("eth_config.json");
+          if (ethCfgFile) {
+            try {
+              auto cfg = nlohmann::json::parse(ethCfgFile, nullptr, false);
+              if (!cfg.is_discarded()) {
+                if (cfg.contains("private_key"))
+                  state.ethPrivateKey = cfg["private_key"].get<std::string>();
+                if (cfg.contains("contract_address"))
+                  state.ethContractAddr = cfg["contract_address"].get<std::string>();
+                if (cfg.contains("rpc_url"))
+                  state.ethRpcUrl = cfg["rpc_url"].get<std::string>();
+              }
+            } catch (...) {}
+          }
+        }
         state.screen = AppScreen::Main;
       } catch (const std::exception &e) {
         state.loginTotpStatus = std::string("Error: ") + e.what();
@@ -898,9 +920,27 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
               BlockchainManager::writeSegmentFile(envs, digest);
               state.chainVerifyStatus =
                   "Block " + std::to_string(segIdx) +
-                  " auto-saved: " + digest.segmentId + ".json" +
-                  "  hash: " + digest.segmentHash.substr(0, 14) + "..." +
-                  "  -> open recording page & paste to sign";
+                  " saved: " + digest.segmentId + ".json" +
+                  "  hash: " + digest.segmentHash.substr(0, 14) + "...";
+              // Submit hash on-chain if Ethereum config is available
+              if (!state.ethPrivateKey.empty() && !state.ethContractAddr.empty()) {
+                state.chainVerifyStatus += "  submitting...";
+                const auto txHash = BlockchainManager::recordOnChain(
+                    digest.segmentHash, state.ethContractAddr,
+                    state.ethPrivateKey, state.ethRpcUrl);
+                if (txHash.starts_with("FAIL")) {
+                  state.chainVerifyStatus += "  " + txHash;
+                } else {
+                  state.chainVerifyStatus =
+                      "Block " + std::to_string(segIdx) +
+                      " recorded on Sepolia  tx: " + txHash.substr(0, 18) + "..." +
+                      "  hash: " + digest.segmentHash.substr(0, 14) + "...";
+                  appendLog("[chain] tx=" + txHash + "\n");
+                }
+              } else {
+                state.chainVerifyStatus +=
+                    "  (set eth_config.json to auto-record on chain)";
+              }
             } catch (const std::exception& ex) {
               appendLog("[auto-export] " + std::string(ex.what()) + "\n");
             }
