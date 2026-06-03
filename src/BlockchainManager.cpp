@@ -541,6 +541,12 @@ static std::vector<uint8_t> ecRecover(
     EC_POINT_set_affine_coordinates(grp, R, x, y, ctx);
 
     BIGNUM* rinv = BN_mod_inverse(nullptr, r, n, ctx);
+    if (!rinv) {
+        BN_free(r); BN_free(s); BN_free(e); BN_free(x);
+        BN_free(p); BN_free(a); BN_free(b); BN_free(rhs); BN_free(exp2); BN_free(y);
+        EC_POINT_free(R); EC_GROUP_free(grp); BN_CTX_free(ctx);
+        throw std::runtime_error("ecRecover: BN_mod_inverse failed (r not invertible mod n)");
+    }
     BIGNUM* u1 = BN_new(); BIGNUM* u2 = BN_new();
     BN_mod_mul(u1, e, rinv, n, ctx);
     BN_sub(u1, n, u1); BN_nnmod(u1, u1, n, ctx); // u1 = -e*r^-1 mod n

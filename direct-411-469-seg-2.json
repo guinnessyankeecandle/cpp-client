@@ -1,0 +1,25 @@
+{
+  "messages": [
+    {
+      "ciphertext": "Up3pYF66YiqIAaBUr6iagz7nIw8LkLwrnEk7g7M=",
+      "index": 1
+    },
+    {
+      "ciphertext": "whKMjobm236UK1ukYt56vAFhnYHoglqeos7YZpQ=",
+      "index": 2
+    },
+    {
+      "ciphertext": "IJUATca/gN8j5ORUyoumn87a3icN2b3EGWEje3U=",
+      "index": 3
+    },
+    {
+      "ciphertext": "85dt3WY+cjdqmgUJeBsyeMImT1kmYffKc0Eh8B4=",
+      "index": 4
+    },
+    {
+      "ciphertext": "97JFk4i5HaVyY+ynPWg7GPJSr4PnxK2/zZxpyXo=",
+      "index": 5
+    }
+  ],
+  "sender_public_key": "wIz5l6c61vQ+KkWUjkhcrJYxr7l20N1Iyct9VKx1jFk="
+}

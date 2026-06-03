@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -92,6 +93,7 @@ struct AppState {
   std::map<std::string, int> segmentExported;   // convId → segments already exported
   std::string chainVerifyStatus;                // result shown in chat area // id → username, safe for all threads
   std::string exportSegNumInput;                // block number for manual segment export (1-based)
+  bool menuMouseEvent{false};                   // set by left-panel CatchEvent; read by on_change
 
   // Ethereum config — loaded from eth_config.json on login
   std::string ethPrivateKey;     // hex, with or without 0x prefix
@@ -518,6 +520,8 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
 struct Poller {
   Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api)
       : m_thread([&] {
+        // Top-level catch so any unexpected exception never reaches std::terminate.
+        try {
           static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
           int spkRotateTick = SPK_ROTATE_INTERVAL;
 
@@ -694,6 +698,14 @@ struct Poller {
                         state.groupSenderKeys[gid] = newKey;
                       }
                       OPENSSL_cleanse(newKey.data(), newKey.size());
+                      // Fetch the actual new epoch after posting so the next tick
+                      // doesn't misinterpret our own SKDM post as a member change
+                      // and enter an infinite rekey loop.
+                      try {
+                        const auto newInfo = api.getGroup(lu.getAccessToken(), gid);
+                        state.knownGroupEpochs[gid] =
+                            newInfo.at("epoch").get<int32_t>();
+                      } catch (...) {}
                       appendLog("[poller] sender key posted for group " +
                                 std::to_string(gid) + "\n");
                     } catch (...) {}
@@ -737,6 +749,9 @@ struct Poller {
             }
             scr.PostEvent(Event::Custom);
           }
+        } catch (...) {
+          appendLog("[poller] fatal exception — thread exiting\n");
+        }
         }) {}
 
   ~Poller() {
@@ -867,12 +882,13 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     state.composeText.clear();
     scr.PostEvent(Event::Custom);
 
+    try {
     std::thread([&state, &api, &scr, isGroup, contactId, groupId,
                  text, token, myId, ikX, ikPub,
                  allContacts = std::move(allContacts)]() mutable {
       // Data computed inside the mutex and used for on-chain recording outside it.
       struct PendingRecord {
-        std::string onChainHash, segFile, ethKey, ethContract, ethRpc;
+        std::string onChainHash, segFile;
         int segIdx{0};
       };
       std::optional<PendingRecord> pending;
@@ -938,9 +954,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                   "  hash: " + onChainHash.substr(0, 16) + "...";
               if (!state.ethPrivateKey.empty() && !state.ethContractAddr.empty()) {
                 state.chainVerifyStatus += "  submitting to Sepolia...";
-                pending = PendingRecord{onChainHash, segFile,
-                    state.ethPrivateKey, state.ethContractAddr,
-                    state.ethRpcUrl, segIdx};
+                pending = PendingRecord{onChainHash, segFile, segIdx};
               } else {
                 state.chainVerifyStatus += "  (add eth_config.json to record on chain)";
               }
@@ -959,30 +973,36 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         appendLog("[send] error: " + std::string(e.what()) + "\n");
       }
 
-      // RPC calls happen here — outside the mutex so the poller is never blocked.
       if (pending) {
         try {
           const auto txHash = BlockchainManager::recordOnChain(
-              pending->onChainHash, pending->ethContract,
-              pending->ethKey, pending->ethRpc);
-          if (txHash.starts_with("FAIL")) {
-            state.chainVerifyStatus += "  " + txHash;
-          } else {
-            state.chainVerifyStatus =
-                "Block " + std::to_string(pending->segIdx) +
-                " recorded on Sepolia  tx: " + txHash.substr(0, 18) + "..." +
-                "  hash: " + pending->onChainHash.substr(0, 16) + "...";
-            appendLog("[chain] tx=" + txHash + "\n");
-          }
+              pending->onChainHash,
+              state.ethContractAddr,
+              state.ethPrivateKey,
+              state.ethRpcUrl,
+              11155111);
+          state.chainVerifyStatus =
+              "Block " + std::to_string(pending->segIdx) +
+              " saved: " + pending->segFile +
+              "  tx: " + txHash.substr(0, 18) + "...";
+          appendLog("[chain] block " + std::to_string(pending->segIdx) + " tx=" + txHash + "\n");
         } catch (const std::exception& ex) {
-          state.chainVerifyStatus += "  FAIL: " + std::string(ex.what());
-          appendLog("[chain] " + std::string(ex.what()) + "\n");
+          state.chainVerifyStatus =
+              "Block " + std::to_string(pending->segIdx) +
+              " saved: " + pending->segFile +
+              "  hash: " + pending->onChainHash.substr(0, 18) + "..." +
+              "  (chain error: " + std::string(ex.what()) + ")";
+          appendLog("[chain] error: " + std::string(ex.what()) + "\n");
         }
       }
 
       state.msgsDirty = true;
       scr.PostEvent(Event::Custom);
     }).detach();
+    } catch (const std::exception& e) {
+      state.statusMsg = "Send error: " + std::string(e.what());
+      scr.PostEvent(Event::Custom);
+    }
   });
 
   MenuOption msgMenuOpt;
@@ -1186,13 +1206,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     scr.PostEvent(Event::Custom);
   };
 
-  // Flag set by the left-panel CatchEvent below so on_change only fires on
-  // deliberate mouse clicks, not on FTXUI's keyboard-navigation clamping.
-  bool menuMouseEvent = false;
   MenuOption menuOpt;
-  menuOpt.on_change = [&menuMouseEvent, selectItem] {
-    if (menuMouseEvent) {
-      menuMouseEvent = false;
+  menuOpt.on_change = [&state, selectItem] {
+    if (state.menuMouseEvent) {
+      state.menuMouseEvent = false;
       selectItem();
     }
   };
@@ -1596,25 +1613,31 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
         // Show blockchain export/verify controls for direct conversations.
         if (inChat && !state.viewingGroup && state.localUser && state.messageStore) {
-          const auto convId = currentConvId();
-          int segN;
+          // Block progress counts only SENT messages — one block = 5 messages you send.
+          const auto allUIMsgs = state.messageStore->getByUser(state.selectedContactId);
+          int sentCount = 0;
+          for (const auto &m : allUIMsgs)
+            if (m.getDirection() == BaseMessage::Direction::Sent)
+              ++sentCount;
+          const int completedBlocks  = sentCount / 5;
+          const int sentInBlock      = sentCount % 5; // 0 means just completed
+          const bool latestReady     = completedBlocks > 0 && sentInBlock == 0;
+
+          // Which block to display / export
+          int displayBlock; // 1-based
           if (!state.exportSegNumInput.empty()) {
-            try { segN = std::stoi(state.exportSegNumInput) - 1; }
-            catch (...) { segN = 0; }
-            if (segN < 0) segN = 0;
+            try { displayBlock = std::stoi(state.exportSegNumInput); }
+            catch (...) { displayBlock = 1; }
+            if (displayBlock < 1) displayBlock = 1;
           } else {
-            const int exported = state.segmentExported.count(convId)
-                ? state.segmentExported.at(convId) : 0;
-            segN = exported;
+            displayBlock = completedBlocks > 0 ? completedBlocks : 1;
           }
-          const int idxLo  = segN * 5, idxHi = idxLo + 4;
-          const auto msgs  = state.messageStore->getByUser(state.selectedContactId);
-          int present = 0;
-          for (const auto &m : msgs) {
-            const int ri = static_cast<int>(m.getRatchetIndex());
-            if (ri >= idxLo && ri <= idxHi) ++present;
-          }
-          const bool segReady = present >= 5;
+          const bool segReady = !state.exportSegNumInput.empty()
+              ? (displayBlock <= completedBlocks)
+              : latestReady;
+          const int present = state.exportSegNumInput.empty()
+              ? (latestReady ? 5 : sentInBlock)
+              : 5;
 
           rows.emplace_back(separator());
           rows.emplace_back(hbox({
@@ -1622,17 +1645,16 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
               exportSegInput->Render() |
                   size(WIDTH, EQUAL, 6) | size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
               text("  "),
-              (segReady || !state.exportSegNumInput.empty())
-                  ? btnExportSegment->Render() : text(""),
+              segReady ? btnExportSegment->Render() : text(""),
               text("  "),
               btnVerifyMsg->Render(),
           }));
           rows.emplace_back(
               text(segReady
-                  ? (" Block " + std::to_string(segN + 1) +
-                     " ready (" + std::to_string(present) + "/5) ")
-                  : (" Block " + std::to_string(segN + 1) + ": " +
-                     std::to_string(present) + "/5 messages ")) | dim);
+                  ? (" Block " + std::to_string(displayBlock) +
+                     " ready (5/5 sent) ")
+                  : (" Block " + std::to_string(displayBlock) + ": " +
+                     std::to_string(present) + "/5 sent ")) | dim);
           if (!state.chainVerifyStatus.empty())
             rows.emplace_back(text(" " + state.chainVerifyStatus) | color(Color::Cyan));
         }
@@ -1641,9 +1663,9 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       });
 
   auto split = ResizableSplitLeft(
-      CatchEvent(leftPanel, [&menuMouseEvent](Event e) {
+      CatchEvent(leftPanel, [&state](Event e) {
         if (e.is_mouse() && e.mouse().button == Mouse::Left)
-          menuMouseEvent = true;
+          state.menuMouseEvent = true;
         return false;
       }),
       rightPanel, &state.splitPos);
@@ -1850,7 +1872,16 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+static void terminalResetHandler(int) {
+  // Disable mouse tracking and restore the terminal before exiting so crash
+  // output doesn't leave raw escape sequences on screen.
+  write(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1003l\033[?1049l\033c", 40);
+  _exit(1);
+}
+
 int main() {
+  signal(SIGSEGV, terminalResetHandler);
+  signal(SIGABRT, terminalResetHandler);
   // Redirect stderr to the log file so crash output never bleeds into the TUI.
   freopen("securemsg.log", "a", stderr);
   auto scr = ScreenInteractive::Fullscreen();
