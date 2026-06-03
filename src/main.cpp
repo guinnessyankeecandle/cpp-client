@@ -87,7 +87,10 @@ struct AppState {
   std::mutex messageMutex;      // guards ratchets, groupRatchets, messageStore
   std::mutex usernameCacheMutex; // guards usernameCache — never held while acquiring the above
   std::unordered_map<int32_t, std::string> usernameCache;
-  bool labelsDirty{true}; // start true so first render picks up initial state // id → username, safe for all threads
+  bool labelsDirty{true}; // start true so first render picks up initial state
+  // Blockchain — per conversation segment tracking
+  std::map<std::string, int> segmentExported;   // convId → segments already exported
+  std::string chainVerifyStatus;                // result shown in chat area // id → username, safe for all threads
 
   std::shared_ptr<std::vector<std::string>> allLabels =
       std::make_shared<std::vector<std::string>>();
@@ -1224,6 +1227,106 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   // FTXUI's focus chain when not viewing a group.  Without this, FTXUI moves
   // focus to addMemberInput when a group is selected, which swallows all
   // keyboard input and makes the UI appear frozen.
+  // ── Blockchain: segment export + verify ──────────────────────────────────
+
+  // Returns the conversation ID string for the current chat.
+  auto currentConvId = [&]() -> std::string {
+    if (!state.localUser) return {};
+    if (!state.viewingGroup && state.selectedContactId >= 0)
+      return "direct-" +
+             std::to_string(std::min(state.localUser->getId(), state.selectedContactId)) +
+             "-" +
+             std::to_string(std::max(state.localUser->getId(), state.selectedContactId));
+    if (state.viewingGroup && state.selectedGroupId >= 0)
+      return "group-" + std::to_string(state.selectedGroupId);
+    return {};
+  };
+
+  auto btnExportSegment = Button(" Export Segment ", [&] {
+    try {
+      if (!state.localUser || !state.messageStore) return;
+      const auto convId = currentConvId();
+      if (convId.empty()) { state.chainVerifyStatus = "No conversation selected."; return; }
+
+      const int exported = state.segmentExported.count(convId)
+          ? state.segmentExported.at(convId) : 0;
+      const int segStart = exported * 5;
+
+      std::vector<Message> msgs;
+      if (!state.viewingGroup) {
+        msgs = state.messageStore->getByUser(state.selectedContactId);
+      }
+      if (static_cast<int>(msgs.size()) < segStart + 5) {
+        state.chainVerifyStatus = "Need " + std::to_string(segStart + 5) +
+            " messages for segment " + std::to_string(exported + 1) +
+            " (have " + std::to_string(msgs.size()) + ").";
+        return;
+      }
+
+      // Take exactly 5 messages for this segment (oldest-first slice).
+      std::vector<MessageEnvelope> envs;
+      const std::string pubB64 = base64Encode(state.localUser->getKeyBundle().ik.pub);
+      for (int i = segStart; i < segStart + 5; ++i) {
+        const auto &m = msgs[static_cast<std::size_t>(i)];
+        const bool sent = m.getDirection() == BaseMessage::Direction::Sent;
+        MessageEnvelope env;
+        env.conversationId   = convId;
+        env.messageId        = std::to_string(m.getId());
+        env.senderId         = sent ? std::to_string(state.localUser->getId())
+                                    : std::to_string(m.getUserId());
+        env.recipientId      = sent ? std::to_string(m.getUserId())
+                                    : std::to_string(state.localUser->getId());
+        env.ciphertext       = m.getCiphertext();
+        env.ratchetHeaderEnc = m.getRatchetHeaderEnc();
+        envs.push_back(std::move(env));
+      }
+
+      const int segIdx = exported + 1;
+      auto digest = BlockchainManager::buildSegmentDigest(envs, convId, segIdx, pubB64);
+
+      // Also write Waleed's format for recording.
+      digest.senderPublicKey = pubB64;
+      const auto path = BlockchainManager::writeSegmentFile(envs, digest);
+
+      state.segmentExported[convId] = segIdx;
+      state.chainVerifyStatus = "Segment " + std::to_string(segIdx) +
+          " exported: " + path + "  hash: " + digest.segmentHash.substr(0, 14) + "…";
+    } catch (const std::exception &e) {
+      state.chainVerifyStatus = std::string("Export error: ") + e.what();
+    }
+    scr.PostEvent(Event::Custom);
+  });
+
+  auto btnVerifyMsg = Button(" Verify Integrity ", [&] {
+    try {
+      if (!state.localUser || !state.messageStore) return;
+      if (state.viewingGroup) { state.chainVerifyStatus = "Verify not yet supported for groups."; return; }
+      if (state.selectedContactId < 0) { state.chainVerifyStatus = "Select a message first."; return; }
+
+      const auto convId = currentConvId();
+      const std::string proofFile = convId + "-seg-1-proofs.json"; // check seg 1 first
+      std::ifstream f(proofFile);
+      if (!f) { state.chainVerifyStatus = "No proof file found (" + proofFile + "). Export and record first."; return; }
+
+      nlohmann::json packages = nlohmann::json::parse(f, nullptr, false);
+      if (packages.is_discarded() || !packages.is_array() || packages.empty()) {
+        state.chainVerifyStatus = "Invalid proof file."; return;
+      }
+
+      // Verify each package in the file.
+      int ok = 0, fail = 0;
+      for (const auto &pkg : packages) {
+        const auto res = BlockchainManager::verifyLocalHashes(pkg);
+        res == "OK" ? ++ok : ++fail;
+      }
+      state.chainVerifyStatus = "Local verify: " + std::to_string(ok) + " OK, " +
+          std::to_string(fail) + " FAIL (paste proof JSON in Blockchain overlay for on-chain check)";
+    } catch (const std::exception &e) {
+      state.chainVerifyStatus = std::string("Verify error: ") + e.what();
+    }
+    scr.PostEvent(Event::Custom);
+  });
+
   auto addMemberMaybe   = Maybe(addMemberInput,   [&] { return state.viewingGroup; });
   auto btnAddMemberMaybe   = Maybe(btnAddMember,  [&] { return state.viewingGroup; });
   auto btnRemoveMemberMaybe = Maybe(btnRemoveMember, [&] { return state.viewingGroup; });
@@ -1231,9 +1334,11 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   const auto rightPanel = Renderer(
       Container::Vertical({msgMenu, composeInput, btnSend, btnDelete,
                            addMemberMaybe, btnAddMemberMaybe,
-                           btnRemoveMemberMaybe}),
+                           btnRemoveMemberMaybe,
+                           btnExportSegment, btnVerifyMsg}),
       [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels,
-       addMemberInput, btnAddMember, btnRemoveMember] {
+       addMemberInput, btnAddMember, btnRemoveMember,
+       btnExportSegment, btnVerifyMsg, currentConvId] {
         const auto _t0 = std::chrono::steady_clock::now();
         auto _log = [&](const char *tag) {
           const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1330,6 +1435,32 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         }
         if (!state.statusMsg.empty())
           rows.emplace_back(text(" " + state.statusMsg) | dim);
+
+        // Show blockchain export/verify controls for direct conversations.
+        if (inChat && !state.viewingGroup && state.localUser && state.messageStore) {
+          const auto convId = currentConvId();
+          const int exported = state.segmentExported.count(convId)
+              ? state.segmentExported.at(convId) : 0;
+          const auto msgs = state.messageStore->getByUser(state.selectedContactId);
+          const int total = static_cast<int>(msgs.size());
+          const int nextSegStart = exported * 5;
+          const bool segReady = total >= nextSegStart + 5;
+
+          rows.emplace_back(separator());
+          rows.emplace_back(hbox({
+              text(segReady
+                  ? (" Seg " + std::to_string(exported + 1) + " ready (" +
+                     std::to_string(nextSegStart) + "-" +
+                     std::to_string(nextSegStart + 4) + ") ")
+                  : (" " + std::to_string(total) + "/5 messages for next segment ")) | dim | flex,
+              segReady ? btnExportSegment->Render() : text(""),
+              text("  "),
+              btnVerifyMsg->Render()
+          }));
+          if (!state.chainVerifyStatus.empty())
+            rows.emplace_back(text(" " + state.chainVerifyStatus) | color(Color::Cyan));
+        }
+
         return vbox(std::move(rows)) | border;
       });
 
@@ -1384,7 +1515,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto chainVerifyInput = noNewlineInput(&state.chainVerifyInput,
                                          "paste proof package JSON…");
 
-  auto btnExportSegment = Button(" Export Segment ", [&] {
+  auto btnChainExport = Button(" Export Segment ", [&] {
     try {
       if (!state.localUser || !state.messageStore) {
         state.chainStatus = "Not logged in."; return;
@@ -1456,16 +1587,16 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   });
 
   auto chainOverlayComp = Renderer(
-      Container::Vertical({chainVerifyInput, btnExportSegment,
+      Container::Vertical({chainVerifyInput, btnChainExport,
                            btnVerifyIntegrity, btnCloseChain}),
-      [&, chainVerifyInput, btnExportSegment, btnVerifyIntegrity, btnCloseChain] {
+      [&, chainVerifyInput, btnChainExport, btnVerifyIntegrity, btnCloseChain] {
         if (!state.showBlockchainOverlay) return text("");
         Elements body = {
             text(" Blockchain ") | bold | center,
             separator(),
             text(" Export Segment ") | dim,
             text(" Take up to 5 messages from current conversation and export for recording. ") | dim,
-            hbox({filler(), btnExportSegment->Render(), filler()}),
+            hbox({filler(), btnChainExport->Render(), filler()}),
             text(" " + state.chainStatus) | color(Color::Cyan),
             separator(),
             text(" Verify Integrity ") | dim,
@@ -1493,7 +1624,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                                        + "] ") |
                                   dim)
                                : text(""),
-                           text(" [Ctrl+K] identity  [Ctrl+B] blockchain  [Ctrl+M] member  [Ctrl+Q] quit ") | dim}) |
+                           text(" [F2] identity  [F3] blockchain  [F4] member  [Ctrl+Q] quit ") | dim}) |
                          bgcolor(Color::Blue),
                      split->Render() | flex,
                  });
@@ -1504,22 +1635,22 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                  return base;
                }),
       [&](const Event &e) {
-        if (e == Event::Special("\x0b")) {
+        if (e == Event::F2) {    // F2 — identity overlay (was Ctrl+K)
           openIdentityOverlay(state);
           scr.PostEvent(Event::Custom);
           return true;
         }
-        if (e == Event::Special("\x02")) {
+        if (e == Event::F3) {    // F3 — blockchain overlay (was Ctrl+B)
           state.showBlockchainOverlay = !state.showBlockchainOverlay;
           scr.PostEvent(Event::Custom);
           return true;
         }
-        if (e == Event::Special("\x11")) {
+        if (e == Event::Special("\x11")) { // Ctrl+Q — quit
           state.poller.reset();
           scr.ExitLoopClosure()();
           return true;
         }
-        if (e == Event::Special("\x0d") && state.viewingGroup &&
+        if (e == Event::F4 && state.viewingGroup &&
             state.selectedGroupId >= 0) {
           const auto git = std::ranges::find_if(
               state.groups,
