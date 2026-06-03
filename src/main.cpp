@@ -1248,26 +1248,41 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       const auto convId = currentConvId();
       if (convId.empty()) { state.chainVerifyStatus = "No conversation selected."; return; }
 
+      // Find the next unexported segment using the ratchet counter.
+      // Segment N covers messages where ratchetIndex ∈ [N*5, N*5+4].
       const int exported = state.segmentExported.count(convId)
           ? state.segmentExported.at(convId) : 0;
-      const int segStart = exported * 5;
+      const int segN = exported; // 0-based segment number to export next
+      const int idxLo = segN * 5;
+      const int idxHi = idxLo + 4;
 
-      std::vector<Message> msgs;
-      if (!state.viewingGroup) {
-        msgs = state.messageStore->getByUser(state.selectedContactId);
+      std::vector<Message> allMsgs;
+      if (!state.viewingGroup)
+        allMsgs = state.messageStore->getByUser(state.selectedContactId);
+
+      // Collect exactly the 5 messages whose ratchetIndex falls in [idxLo, idxHi].
+      std::vector<Message> segMsgs;
+      for (const auto &m : allMsgs) {
+        const int ri = static_cast<int>(m.getRatchetIndex());
+        if (ri >= idxLo && ri <= idxHi)
+          segMsgs.push_back(m);
       }
-      if (static_cast<int>(msgs.size()) < segStart + 5) {
-        state.chainVerifyStatus = "Need " + std::to_string(segStart + 5) +
-            " messages for segment " + std::to_string(exported + 1) +
-            " (have " + std::to_string(msgs.size()) + ").";
+      // Sort by ratchetIndex so envelopes are in canonical order.
+      std::ranges::sort(segMsgs, [](const auto &a, const auto &b) {
+        return a.getRatchetIndex() < b.getRatchetIndex();
+      });
+
+      if (static_cast<int>(segMsgs.size()) < 5) {
+        state.chainVerifyStatus = "Segment " + std::to_string(segN + 1) +
+            " needs ratchet indices " + std::to_string(idxLo) + "–" +
+            std::to_string(idxHi) + " (" +
+            std::to_string(segMsgs.size()) + "/5 present).";
         return;
       }
 
-      // Take exactly 5 messages for this segment (oldest-first slice).
-      std::vector<MessageEnvelope> envs;
       const std::string pubB64 = base64Encode(state.localUser->getKeyBundle().ik.pub);
-      for (int i = segStart; i < segStart + 5; ++i) {
-        const auto &m = msgs[static_cast<std::size_t>(i)];
+      std::vector<MessageEnvelope> envs;
+      for (const auto &m : segMsgs) {
         const bool sent = m.getDirection() == BaseMessage::Direction::Sent;
         MessageEnvelope env;
         env.conversationId   = convId;
@@ -1281,11 +1296,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         envs.push_back(std::move(env));
       }
 
-      const int segIdx = exported + 1;
+      const int segIdx = segN + 1; // 1-based for filenames
       auto digest = BlockchainManager::buildSegmentDigest(envs, convId, segIdx, pubB64);
-
-      // Also write Waleed's format for recording.
-      digest.senderPublicKey = pubB64;
       const auto path = BlockchainManager::writeSegmentFile(envs, digest);
 
       state.segmentExported[convId] = segIdx;
@@ -1304,7 +1316,18 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       if (state.selectedContactId < 0) { state.chainVerifyStatus = "Select a message first."; return; }
 
       const auto convId = currentConvId();
-      const std::string proofFile = convId + "-seg-1-proofs.json"; // check seg 1 first
+      // Find which segment the selected message belongs to via its ratchet index.
+      int segIdx = 1;
+      if (state.selectedMsgId >= 0) {
+        const auto msgs = state.messageStore->getByUser(state.selectedContactId);
+        for (const auto &m : msgs) {
+          if (m.getId() == state.selectedMsgId) {
+            segIdx = static_cast<int>(m.getRatchetIndex()) / 5 + 1;
+            break;
+          }
+        }
+      }
+      const std::string proofFile = convId + "-seg-" + std::to_string(segIdx) + "-proofs.json";
       std::ifstream f(proofFile);
       if (!f) { state.chainVerifyStatus = "No proof file found (" + proofFile + "). Export and record first."; return; }
 
@@ -1441,18 +1464,24 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           const auto convId = currentConvId();
           const int exported = state.segmentExported.count(convId)
               ? state.segmentExported.at(convId) : 0;
-          const auto msgs = state.messageStore->getByUser(state.selectedContactId);
-          const int total = static_cast<int>(msgs.size());
-          const int nextSegStart = exported * 5;
-          const bool segReady = total >= nextSegStart + 5;
+          const int segN   = exported;
+          const int idxLo  = segN * 5, idxHi = idxLo + 4;
+          const auto msgs  = state.messageStore->getByUser(state.selectedContactId);
+          int present = 0;
+          for (const auto &m : msgs) {
+            const int ri = static_cast<int>(m.getRatchetIndex());
+            if (ri >= idxLo && ri <= idxHi) ++present;
+          }
+          const bool segReady = present >= 5;
 
           rows.emplace_back(separator());
           rows.emplace_back(hbox({
               text(segReady
-                  ? (" Seg " + std::to_string(exported + 1) + " ready (" +
-                     std::to_string(nextSegStart) + "-" +
-                     std::to_string(nextSegStart + 4) + ") ")
-                  : (" " + std::to_string(total) + "/5 messages for next segment ")) | dim | flex,
+                  ? (" Segment " + std::to_string(segN + 1) +
+                     " ready (indices " + std::to_string(idxLo) + "–" +
+                     std::to_string(idxHi) + ") ")
+                  : (" Segment " + std::to_string(segN + 1) + ": " +
+                     std::to_string(present) + "/5 messages ")) | dim | flex,
               segReady ? btnExportSegment->Render() : text(""),
               text("  "),
               btnVerifyMsg->Render()
