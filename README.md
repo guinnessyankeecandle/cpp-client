@@ -80,23 +80,23 @@ The client is a standalone C++ application that integrates several modern techno
 
 The project targets modern Linux environments (Fedora/Debian) with GCC 16+ or Clang 20+.
 
-| Component    | Fedora/dnf             | Debian/apt             | Purpose                  |
-|:-------------|:-----------------------|:-----------------------|:-------------------------|
-| Compiler     | `gcc-c++` / `clang`    | `g++` / `clang`        | C++23 Modules support    |
-| Build System | `cmake`, `ninja-build` | `cmake`, `ninja-build` | Generator for modules    |
-| Crypto       | `openssl-devel`        | `libssl-dev`           | AES, X25519, ML-KEM      |
-| Auth         | `python3-devel`        | `python3-dev`          | Python C API for pysrp   |
-| SRP          | `srp` (via pip)        | `srp` (via pip)        | SRP-6a client logic      |
-| JSON         | `nlohmann-json-devel`  | `nlohmann-json3-dev`   | JSON parsing/API         |
-| System       | `glibc-devel`          | `linux-libc-dev`       | Standard system headers  |
-| Kernel       | `kernel-headers`       | —                      | Linux kernel headers     |
-| QR Codes     | `qrencode`             | `qrencode`             | TOTP setup visualization |
-| Network      | `libcurl-devel`        | `libcurl4-openssl-dev` | HTTPS API calls          |
-| Storage      | `sqlite-devel`         | `libsqlite3-dev`       | Encrypted key storage    |
-| TUI          | `ftxui-devel`          | `libftxui-dev`         | Terminal interface       |
-| Testing      | `catch2-devel`         | `catch2-dev`           | Unit test framework      |
-| Package Mgr  | `python3-pip`          | `python3-pip`          | Installs Conan           |
-| Conan        | `conan` (via pip)      | `conan` (via pip)      | C++ dependency manager   |
+| Component    | Fedora/dnf             | Debian/apt             | Purpose                                   |
+|:-------------|:-----------------------|:-----------------------|:------------------------------------------|
+| Compiler     | `gcc-c++` / `clang`    | `g++` / `clang`        | C++23 Modules support                     |
+| Build System | `cmake`, `ninja-build` | `cmake`, `ninja-build` | Generator for modules                     |
+| Crypto       | `openssl-devel`        | `libssl-dev`           | AES, X25519, ML-KEM, HTTPS transport      |
+| Auth         | `python3-devel`        | `python3-dev`          | Python C API for pysrp                    |
+| SRP          | `srp` (via pip)        | `srp` (via pip)        | SRP-6a client logic                       |
+| JSON         | `nlohmann-json-devel`  | `nlohmann-json3-dev`   | JSON parsing/API                          |
+| System       | `glibc-devel`          | `linux-libc-dev`       | Standard system headers                   |
+| Kernel       | `kernel-headers`       | —                      | Linux kernel headers                      |
+| QR Codes     | `qrencode`             | `qrencode`             | TOTP setup visualization                  |
+| Network      | `libcurl-devel`        | `libcurl4-openssl-dev` | Ethereum JSON-RPC calls (blockchain only) |
+| Storage      | `sqlite-devel`         | `libsqlite3-dev`       | Encrypted key storage                     |
+| TUI          | `ftxui-devel`          | `libftxui-dev`         | Terminal interface                        |
+| Testing      | `catch2-devel`         | `catch2-dev`           | Unit test framework                       |
+| Package Mgr  | `python3-pip`          | `python3-pip`          | Installs Conan                            |
+| Conan        | `conan` (via pip)      | `conan` (via pip)      | C++ dependency manager                    |
 (Works on Fedora may need to install manually for other operating systems)
 
 

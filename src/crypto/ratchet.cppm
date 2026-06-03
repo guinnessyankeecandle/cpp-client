@@ -247,7 +247,7 @@ public:
     auto plain = aeadDecrypt(pkt, mk);
     OPENSSL_cleanse(mk.data(), mk.size());
     m_processed.insert(msgKey);
-    return {std::move(plain), hdr.timestampMs};
+    return {std::move(plain), hdr.timestampMs, hdr.totalSentCount};
   }
 
   ~RatchetState() {

@@ -144,7 +144,7 @@ target_sources(securemsg_network PUBLIC
         src/network/http.cppm
         src/network/api.cppm
         src/network/network.cppm)
-target_link_libraries(securemsg_network PUBLIC CURL::libcurl nlohmann_json::nlohmann_json)
+target_link_libraries(securemsg_network PUBLIC OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
 target_compile_options(securemsg_network PRIVATE -Wall -Wextra)
 
 # ── Messaging ─────────────────────────────────────────────────────────────────
