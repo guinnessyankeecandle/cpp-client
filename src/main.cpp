@@ -3,6 +3,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <execinfo.h>
+#include <fcntl.h>
 #include <filesystem>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -1872,16 +1874,71 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-static void terminalResetHandler(int) {
-  // Disable mouse tracking and restore the terminal before exiting so crash
-  // output doesn't leave raw escape sequences on screen.
+// Async-signal-safe write to log file.
+static void crashWriteLog(int fd, const char* msg) {
+  write(fd, msg, strlen(msg));
+}
+
+static void crashHandler(int sig) {
+  // Open log file (O_APPEND is async-signal-safe).
+  int fd = open("securemsg.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd >= 0) {
+    const char* signame = (sig == SIGSEGV) ? "SIGSEGV"
+                        : (sig == SIGABRT) ? "SIGABRT"
+                        : (sig == SIGBUS)  ? "SIGBUS"
+                        : (sig == SIGILL)  ? "SIGILL"
+                        :                   "UNKNOWN";
+    crashWriteLog(fd, "\n[CRASH] *** signal=");
+    crashWriteLog(fd, signame);
+    crashWriteLog(fd, " ***\n[CRASH] backtrace:\n");
+    void* bt[32];
+    int n = backtrace(bt, 32);
+    backtrace_symbols_fd(bt, n, fd);
+    crashWriteLog(fd, "[CRASH] end backtrace\n\n");
+    close(fd);
+  }
+  // Restore terminal before exit so no raw escape sequences are left on screen.
   write(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1003l\033[?1049l\033c", 40);
   _exit(1);
 }
 
+static void terminateHandler() {
+  std::ofstream log("securemsg.log", std::ios::app);
+  log << "\n[CRASH] *** std::terminate called";
+  // Try to identify the active exception.
+  try {
+    auto ep = std::current_exception();
+    if (ep) {
+      std::rethrow_exception(ep);
+    } else {
+      log << " (no active exception — likely a pure virtual call or double-throw)\n";
+    }
+  } catch (const std::exception& e) {
+    log << ": " << e.what() << "\n";
+  } catch (...) {
+    log << ": non-std exception\n";
+  }
+  // Backtrace via symbols (not in async-signal context, so this is safe).
+  void* bt[32];
+  int n = backtrace(bt, 32);
+  char** syms = backtrace_symbols(bt, n);
+  if (syms) {
+    for (int i = 0; i < n; ++i) log << "[CRASH]   " << syms[i] << "\n";
+    free(syms);
+  }
+  log << "[CRASH] end backtrace\n\n";
+  log.flush();
+  // Raise SIGABRT so crashHandler also fires (restores terminal).
+  signal(SIGABRT, crashHandler);
+  std::abort();
+}
+
 int main() {
-  signal(SIGSEGV, terminalResetHandler);
-  signal(SIGABRT, terminalResetHandler);
+  signal(SIGSEGV, crashHandler);
+  signal(SIGABRT, crashHandler);
+  signal(SIGBUS,  crashHandler);
+  signal(SIGILL,  crashHandler);
+  std::set_terminate(terminateHandler);
   // Redirect stderr to the log file so crash output never bleeds into the TUI.
   freopen("securemsg.log", "a", stderr);
   auto scr = ScreenInteractive::Fullscreen();

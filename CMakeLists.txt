@@ -190,6 +190,7 @@ target_link_libraries(securemsg PRIVATE
     securemsg_main_logic securemsg_blockchain
     ftxui::screen ftxui::dom ftxui::component)
 target_compile_options(securemsg PRIVATE -Wall -Wextra -Wpedantic)
+target_link_options(securemsg PRIVATE -rdynamic)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 include(CTest)

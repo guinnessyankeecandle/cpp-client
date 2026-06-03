@@ -9,7 +9,7 @@ A terminal UI (TUI) secure messaging client implementing the Signal Protocol wit
 - **Group Messaging** — Implements the **Signal Sender Key** protocol, allowing efficient O(1) group encryption.
 - **Zero-Knowledge Authentication** — Uses **SRP-6a** (Secure Remote Password) so the server never handles user passwords. Supports **TOTP 2FA** on every login.
 - **Local Key Protection** — Long-term identity and session keys are stored locally using **SQLite**, encrypted at rest with **AES-256-GCM** via a key derived from the user's password (**PBKDF2-HMAC-SHA256**, 600k iterations).
-- **Tamper-Evident Integrity** — Integrated with a blockchain-based audit log (Ethereum Sepolia) to detect server-side history manipulation.
+- **Tamper-Evident Integrity** — Every 5 sent messages the client auto-exports a signed segment bundle (`direct-X-Y-seg-N.json`), computes a `keccak256` hash, and submits it on-chain to Ethereum Sepolia via a `recordDigest` contract call. A manual **Export Segment** and **Verify Integrity** button are available in the chat panel for direct conversations.
 - **Modern Terminal User Interface (FTXUI)** — A high-performance, interactive TUI built with **FTXUI**. It provides a desktop-like experience in the terminal with support for mouse interaction, complex layouts (flexbox-style), and animated transitions.
 - **TOTP 2FA with QR Codes** — Multi-factor authentication is required on every login. The client uses `libqrencode` to render QR codes directly in the terminal using UTF-8 block characters, allowing for seamless setup with standard authenticator apps (Google Authenticator, Raivo, etc.).
 
@@ -74,15 +74,15 @@ The client is a standalone C++ application that integrates several modern techno
 2.  **Auth Layer:** mutual authentication via SRP-6a + TOTP.
 3.  **Keys:** Automated generation and publication of PQXDH prekey bundles.
 4.  **Messaging:** End-to-end encrypted payloads using AES-256-GCM.
-5.  **Audit:** Periodic `keccak256` hashing of conversation states recorded on-chain.
+5.  **Audit:** Auto-export every 5 sent messages → `keccak256` hash → `recordDigest` transaction on Ethereum Sepolia. Requires `eth_config.json` (see below). Group integrity verification is not yet supported.
 
 ## Prerequisites
 
-The project targets modern Linux environments (Fedora/Debian) with GCC 16+ or Clang 20+.
+The project targets modern Linux environments (Fedora/Debian) with GCC 13+ or Clang 18+. C++20 is required.
 
 | Component    | Fedora/dnf             | Debian/apt             | Purpose                                   |
 |:-------------|:-----------------------|:-----------------------|:------------------------------------------|
-| Compiler     | `gcc-c++` / `clang`    | `g++` / `clang`        | C++23 Modules support                     |
+| Compiler     | `gcc-c++` / `clang`    | `g++` / `clang`        | C++20 support (GCC 13+ / Clang 18+)       |
 | Build System | `cmake`, `ninja-build` | `cmake`, `ninja-build` | Generator for modules                     |
 | Crypto       | `openssl-devel`        | `libssl-dev`           | AES, X25519, ML-KEM, HTTPS transport      |
 | Auth         | `python3-devel`        | `python3-dev`          | Python C API for pysrp                    |
@@ -99,6 +99,20 @@ The project targets modern Linux environments (Fedora/Debian) with GCC 16+ or Cl
 | Conan        | `conan` (via pip)      | `conan` (via pip)      | C++ dependency manager                    |
 (Works on Fedora may need to install manually for other operating systems)
 
+
+## Blockchain Configuration
+
+To enable on-chain recording, create `eth_config.json` in the working directory before launching the client:
+
+```json
+{
+    "private_key": "0x<your-32-byte-hex-private-key>",
+    "contract_address": "0x<your-deployed-contract-address>",
+    "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com"
+}
+```
+
+The client loads this file on login. Without it, segment files are still exported locally but the Sepolia transaction is skipped and the status bar will show `(add eth_config.json to record on chain)`.
 
 ## Getting Started
 
