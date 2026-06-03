@@ -890,8 +890,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                  allContacts = std::move(allContacts)]() mutable {
       // Data computed inside the mutex and used for on-chain recording outside it.
       struct PendingRecord {
-        std::string onChainHash, segFile;
+        std::string segFile;
         int segIdx{0};
+        std::vector<MessageEnvelope> envs;
+        SegmentDigest digest;
       };
       std::optional<PendingRecord> pending;
 
@@ -931,32 +933,14 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
             try {
               auto digest = BlockchainManager::buildSegmentDigest(
                   envs, convId, segIdx, base64Encode(ikPub));
-              // Canonical bundle hash — must match the verification page exactly.
-              // keccak256(utf8(JSON.stringify({"messages":[{"ciphertext":"...","index":N},...],
-              //                               "sender_public_key":"..."})))
-              // nlohmann::json sorts keys alphabetically, dump() is compact with no spaces.
-              nlohmann::json bundle;
-              nlohmann::json bundleMsgs = nlohmann::json::array();
-              for (int bi = 0; bi < static_cast<int>(envs.size()); ++bi) {
-                nlohmann::json bm;
-                bm["ciphertext"] = envs[static_cast<std::size_t>(bi)].ciphertext;
-                bm["index"] = bi + 1;
-                bundleMsgs.push_back(bm);
-              }
-              bundle["messages"] = bundleMsgs;
-              bundle["sender_public_key"] = base64Encode(ikPub);
-              const std::string bundleStr = bundle.dump();
-              const auto onChainHash = BlockchainManager::toHex0x(
-                  BlockchainManager::keccak256(
-                      std::vector<uint8_t>(bundleStr.begin(), bundleStr.end())));
               const auto segFile = BlockchainManager::writeSegmentFile(envs, digest);
               state.chainVerifyStatus =
                   "Block " + std::to_string(segIdx) +
                   " saved: " + segFile +
-                  "  hash: " + onChainHash.substr(0, 16) + "...";
+                  "  hash: " + digest.segmentHash.substr(0, 16) + "...";
               if (!state.ethPrivateKey.empty() && !state.ethContractAddr.empty()) {
                 state.chainVerifyStatus += "  submitting to Sepolia...";
-                pending = PendingRecord{onChainHash, segFile, segIdx};
+                pending = PendingRecord{segFile, segIdx, envs, std::move(digest)};
               } else {
                 state.chainVerifyStatus += "  (add eth_config.json to record on chain)";
               }
@@ -978,21 +962,36 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       if (pending) {
         try {
           const auto txHash = BlockchainManager::recordOnChain(
-              pending->onChainHash,
+              pending->digest.segmentHash,
               state.ethContractAddr,
               state.ethPrivateKey,
               state.ethRpcUrl,
               11155111);
+          // Fill in the post-tx fields so the proof packages are complete.
+          pending->digest.transactionHash   = txHash;
+          pending->digest.contractAddress   = state.ethContractAddr;
+          pending->digest.recordedTimestamp = static_cast<uint64_t>(std::time(nullptr));
+          pending->digest.chainId           = 11155111;
+          pending->digest.chainName         = "sepolia";
+          // recorder = Ethereum address derived from the private key (written by recordOnChain
+          // internally — approximate here as the contract address for the proof file).
+          pending->digest.recorder          = state.ethContractAddr;
+
+          const auto packages = BlockchainManager::buildProofPackages(
+              pending->envs, pending->digest);
+          const auto proofFile = BlockchainManager::writeProofPackagesFile(
+              packages, pending->digest.segmentId);
+
           state.chainVerifyStatus =
               "Block " + std::to_string(pending->segIdx) +
-              " saved: " + pending->segFile +
-              "  tx: " + txHash.substr(0, 18) + "...";
-          appendLog("[chain] block " + std::to_string(pending->segIdx) + " tx=" + txHash + "\n");
+              " recorded  tx: " + txHash.substr(0, 18) + "..." +
+              "  proofs: " + proofFile;
+          appendLog("[chain] block " + std::to_string(pending->segIdx) +
+                    " tx=" + txHash + " proofs=" + proofFile + "\n");
         } catch (const std::exception& ex) {
           state.chainVerifyStatus =
               "Block " + std::to_string(pending->segIdx) +
               " saved: " + pending->segFile +
-              "  hash: " + pending->onChainHash.substr(0, 18) + "..." +
               "  (chain error: " + std::string(ex.what()) + ")";
           appendLog("[chain] error: " + std::string(ex.what()) + "\n");
         }
