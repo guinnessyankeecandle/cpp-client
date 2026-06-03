@@ -163,13 +163,45 @@ std::vector<uint8_t> BlockchainManager::fromHex0x(const std::string& hex) {
 
 std::vector<uint8_t> BlockchainManager::segmentHash(const std::vector<std::vector<uint8_t>>& leafHashes) {
     if (leafHashes.empty()) throw std::invalid_argument("No leaf hashes");
-    static const std::string DOMAIN = "SecureMsgSegmentDigest:v1";
-    std::vector<uint8_t> data(DOMAIN.begin(), DOMAIN.end());
+    static const std::string SEGMENT_HASH_DOMAIN = "SecureMsgSegmentDigest:v1";
+    std::vector<uint8_t> data(SEGMENT_HASH_DOMAIN.begin(), SEGMENT_HASH_DOMAIN.end());
     for (const auto& h : leafHashes) {
         if (h.size() != 32) throw std::invalid_argument("Leaf hash must be 32 bytes");
         data.insert(data.end(), h.begin(), h.end());
     }
     return keccak256(data);
+}
+
+// ── Verifier bundle hash ─────────────────────────────────────────────────────
+// Must match verification-page/src/hashMessages.ts:
+// keccak256(utf8(JSON.stringify({
+//   sender_public_key,
+//   messages: [{ index, ciphertext }, ...]
+// })))
+
+std::vector<uint8_t> BlockchainManager::bundleHash(const std::vector<MessageEnvelope>& envs,
+                                                   const std::string& senderPublicKeyB64)
+{
+    if (envs.size() != 5) throw std::invalid_argument("Bundle must contain exactly 5 messages");
+    if (senderPublicKeyB64.empty()) throw std::invalid_argument("sender_public_key is required");
+
+    nlohmann::ordered_json messages = nlohmann::ordered_json::array();
+    for (int i = 0; i < static_cast<int>(envs.size()); ++i) {
+        if (envs[static_cast<std::size_t>(i)].ciphertext.empty())
+            throw std::invalid_argument("ciphertext is required");
+
+        nlohmann::ordered_json message;
+        message["index"] = i + 1;
+        message["ciphertext"] = envs[static_cast<std::size_t>(i)].ciphertext;
+        messages.push_back(std::move(message));
+    }
+
+    nlohmann::ordered_json bundle;
+    bundle["sender_public_key"] = senderPublicKeyB64;
+    bundle["messages"] = std::move(messages);
+
+    const std::string bundleJson = bundle.dump();
+    return keccak256(std::vector<uint8_t>(bundleJson.begin(), bundleJson.end()));
 }
 
 // ── Segment digest builder ────────────────────────────────────────────────────
@@ -595,7 +627,7 @@ static nlohmann::json ethRpc(const std::string& url, const nlohmann::json& req) 
 } // anonymous namespace
 
 std::string BlockchainManager::recordOnChain(
-    const std::string& segmentHashHex,
+    const std::string& bundleHashHex,
     const std::string& contractAddress,
     const std::string& privateKeyHex,
     const std::string& rpcUrl,
@@ -607,8 +639,8 @@ std::string BlockchainManager::recordOnChain(
         if (privKey.size() != 32) throw std::invalid_argument("Private key must be 32 bytes");
         auto toAddr = fromHex0x(contractAddress);
         if (toAddr.size() != 20) throw std::invalid_argument("Contract address must be 20 bytes");
-        auto hashBytes = fromHex0x(segmentHashHex);
-        if (hashBytes.size() != 32) throw std::invalid_argument("Segment hash must be 32 bytes");
+        auto hashBytes = fromHex0x(bundleHashHex);
+        if (hashBytes.size() != 32) throw std::invalid_argument("Bundle hash must be 32 bytes");
 
         // Derive sender address for nonce lookup
         auto senderBytes = ethAddr(privKey);
@@ -644,11 +676,16 @@ std::string BlockchainManager::recordOnChain(
         EC_POINT_mul(grp, pubPt, privBn, nullptr, nullptr, ctx);
         EC_KEY_set_public_key(key, pubPt);
 
-        // Sign the segment hash with the private key for the `bytes signature` parameter.
+        // Sign the EIP-191 hash for the `bytes signature` parameter.
+        // Solidity verifies MessageHashUtils.toEthSignedMessageHash(hash).
         // Format: r (32) || s (32) || v (1), v = recId + 27 (message-signing convention).
+        const std::string personalPrefix = "\x19" "Ethereum Signed Message:\n32";
+        std::vector<uint8_t> personalPayload(personalPrefix.begin(), personalPrefix.end());
+        personalPayload.insert(personalPayload.end(), hashBytes.begin(), hashBytes.end());
+        const auto personalHash = keccak256(personalPayload);
         std::vector<uint8_t> msgSig(65);
         {
-            ECDSA_SIG* ms = ECDSA_do_sign(hashBytes.data(), 32, key);
+            ECDSA_SIG* ms = ECDSA_do_sign(personalHash.data(), 32, key);
             if (!ms) throw std::runtime_error("Message sign failed");
             const BIGNUM* mr = nullptr; const BIGNUM* mss = nullptr;
             ECDSA_SIG_get0(ms, &mr, &mss);
@@ -667,7 +704,7 @@ std::string BlockchainManager::recordOnChain(
             }
             int mrid = -1;
             for (int rid = 0; rid < 2; ++rid) {
-                auto rp = ecRecover(hashBytes, mr32, ms32, rid);
+                auto rp = ecRecover(personalHash, mr32, ms32, rid);
                 auto rh = keccak256(rp);
                 if (std::equal(rh.begin() + 12, rh.end(), senderBytes.begin()))
                 { mrid = rid; break; }

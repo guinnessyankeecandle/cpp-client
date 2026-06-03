@@ -931,24 +931,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
             try {
               auto digest = BlockchainManager::buildSegmentDigest(
                   envs, convId, segIdx, base64Encode(ikPub));
-              // Canonical bundle hash — must match the verification page exactly.
-              // keccak256(utf8(JSON.stringify({"messages":[{"ciphertext":"...","index":N},...],
-              //                               "sender_public_key":"..."})))
-              // nlohmann::json sorts keys alphabetically, dump() is compact with no spaces.
-              nlohmann::json bundle;
-              nlohmann::json bundleMsgs = nlohmann::json::array();
-              for (int bi = 0; bi < static_cast<int>(envs.size()); ++bi) {
-                nlohmann::json bm;
-                bm["ciphertext"] = envs[static_cast<std::size_t>(bi)].ciphertext;
-                bm["index"] = bi + 1;
-                bundleMsgs.push_back(bm);
-              }
-              bundle["messages"] = bundleMsgs;
-              bundle["sender_public_key"] = base64Encode(ikPub);
-              const std::string bundleStr = bundle.dump();
               const auto onChainHash = BlockchainManager::toHex0x(
-                  BlockchainManager::keccak256(
-                      std::vector<uint8_t>(bundleStr.begin(), bundleStr.end())));
+                  BlockchainManager::bundleHash(envs, base64Encode(ikPub)));
               const auto segFile = BlockchainManager::writeSegmentFile(envs, digest);
               state.chainVerifyStatus =
                   "Block " + std::to_string(segIdx) +
@@ -1446,10 +1430,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       const int segIdx = segN + 1; // 1-based for filenames
       auto digest = BlockchainManager::buildSegmentDigest(envs, convId, segIdx, pubB64);
       const auto path = BlockchainManager::writeSegmentFile(envs, digest);
+      const auto verifierHash = BlockchainManager::toHex0x(
+          BlockchainManager::bundleHash(envs, pubB64));
 
       state.segmentExported[convId] = segIdx;
       state.chainVerifyStatus = "Segment " + std::to_string(segIdx) +
-          " exported: " + path + "  hash: " + digest.segmentHash.substr(0, 14) + "…";
+          " exported: " + path + "  hash: " + verifierHash.substr(0, 14) + "…";
     } catch (const std::exception &e) {
       state.chainVerifyStatus = std::string("Export error: ") + e.what();
     }
@@ -1763,8 +1749,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           state.chainLastEnvs, convLabel, ++state.chainSegIdx, pubB64);
       const auto path = BlockchainManager::writeSegmentFile(
           state.chainLastEnvs, state.chainDigest);
+      const auto verifierHash = BlockchainManager::toHex0x(
+          BlockchainManager::bundleHash(state.chainLastEnvs, pubB64));
       state.chainStatus = "Exported: " + path + "  hash: " +
-                          state.chainDigest.segmentHash.substr(0, 12) + "…";
+                          verifierHash.substr(0, 12) + "…";
     } catch (const std::exception &ex) {
       state.chainStatus = std::string("Error: ") + ex.what();
     }

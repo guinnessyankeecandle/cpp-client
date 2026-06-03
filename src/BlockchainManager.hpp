@@ -40,6 +40,8 @@ public:
     static std::string canonicalise(const MessageEnvelope& env);
     static std::vector<uint8_t> leafHash(const MessageEnvelope& env);
     static std::vector<uint8_t> segmentHash(const std::vector<std::vector<uint8_t>>& leafHashes);
+    static std::vector<uint8_t> bundleHash(const std::vector<MessageEnvelope>& envs,
+                                           const std::string& senderPublicKeyB64);
 
     static SegmentDigest buildSegmentDigest(const std::vector<MessageEnvelope>& envs,
                                             const std::string& conversationId,
@@ -60,9 +62,9 @@ public:
     static std::string verifyLocalHashes(const nlohmann::json& package);
     static std::string verifyOnChain(const nlohmann::json& package, const std::string& rpcUrl);
 
-    // Sign and submit the segment hash to the audit contract on Sepolia.
+    // Sign and submit the verifier bundle hash to the audit contract on Sepolia.
     // Returns the transaction hash on success, or a "FAIL: ..." string on error.
-    static std::string recordOnChain(const std::string& segmentHashHex,
+    static std::string recordOnChain(const std::string& bundleHashHex,
                                      const std::string& contractAddress,
                                      const std::string& privateKeyHex,
                                      const std::string& rpcUrl,
