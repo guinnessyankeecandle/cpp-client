@@ -1044,14 +1044,13 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   };
   rebuildLabels();
 
-  // Snapshot contact/group IDs under stateMutex to avoid data race with poller.
-  // Uses try_to_lock so it NEVER blocks the FTXUI event loop thread.
+  // Snapshot contact/group IDs under stateMutex so the index arithmetic
+  // in resolveMenuSelection matches what rebuildLabels used to build allLabels.
+  // lock_guard is safe here — the Poller holds stateMutex for microseconds.
   auto selectItem = [&state, &scr] {
     std::vector<int32_t> cIds, gIds;
     {
-      std::unique_lock<std::mutex> lk(state.stateMutex, std::try_to_lock);
-      if (!lk)
-        return; // Poller holds the lock; next click will succeed
+      std::lock_guard<std::mutex> lk(state.stateMutex);
       std::ranges::transform(state.contacts, std::back_inserter(cIds),
                              [](const auto &c) { return c.getId(); });
       std::ranges::transform(state.groups, std::back_inserter(gIds),
