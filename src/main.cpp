@@ -91,6 +91,7 @@ struct AppState {
   // Blockchain — per conversation segment tracking
   std::map<std::string, int> segmentExported;   // convId → segments already exported
   std::string chainVerifyStatus;                // result shown in chat area // id → username, safe for all threads
+  std::string exportSegNumInput;                // block number for manual segment export (1-based)
 
   std::shared_ptr<std::vector<std::string>> allLabels =
       std::make_shared<std::vector<std::string>>();
@@ -439,6 +440,12 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
           for (const auto &c : state.contactCache)
             state.usernameCache[c.getId()] = c.getUsername();
         }
+        // Pre-populate sidebar immediately from cache — poller fills in the rest.
+        {
+          const std::lock_guard<std::mutex> lk(state.stateMutex);
+          state.contacts = state.contactCache;
+          state.labelsDirty = true;
+        }
         state.messageStore =
             MessageStore("messages_" + state.loginUsername + ".db",
                          state.localUser->getDbKey());
@@ -759,6 +766,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     state.poller = std::make_unique<Poller>(state, scr, api);
 
   auto composeInput = noNewlineInput(&state.composeText, "Type a message...");
+  auto exportSegInput = digitOnlyInput(&state.exportSegNumInput, "block#");
 
   // Lock-free lookup via usernameCache — never touches contacts/contactCache directly
   // (avoids data race with the poller which writes those vectors under stateMutex)
@@ -806,7 +814,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       for (std::size_t i = 0; i < directMsgs.size(); ++i) {
         const auto &m = directMsgs[i];
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
-        msgLabels->emplace_back(" " + std::to_string(m.getRatchetIndex()) + ". " +
+        msgLabels->emplace_back(" " + std::to_string(m.getRatchetIndex() + 1) + ". " +
                                 (mine ? myName : theirName) + ": " + m.getPlaintext());
         msgIds->emplace_back(m.getId());
         msgSent->emplace_back(mine);
@@ -839,6 +847,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     const std::string token   = state.localUser->getAccessToken();
     const int32_t myId        = state.localUser->getId();
     const RawKeyPair ikX      = state.localUser->getKeyBundle().ikX;
+    const std::vector<uint8_t> ikPub = state.localUser->getKeyBundle().ik.pub;
     std::vector<Contact> allContacts = state.contacts;
     for (const auto &c : state.contactCache)
       if (std::ranges::none_of(allContacts,
@@ -849,13 +858,53 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     scr.PostEvent(Event::Custom);
 
     std::thread([&state, &api, &scr, isGroup, contactId, groupId,
-                 text, token, myId, ikX,
+                 text, token, myId, ikX, ikPub,
                  allContacts = std::move(allContacts)]() mutable {
       try {
         std::lock_guard<std::mutex> msgLock(state.messageMutex);
         if (!isGroup && contactId >= 0) {
           sendDirectMessage(api, state.ratchets, *state.messageStore,
                             token, contactId, text, ikX, allContacts);
+          // Auto-export a segment file every time 5 sent messages accumulate.
+          const auto allMsgs = state.messageStore->getByUser(contactId);
+          std::vector<Message> sentMsgs;
+          for (const auto& m : allMsgs)
+            if (m.getDirection() == BaseMessage::Direction::Sent)
+              sentMsgs.push_back(m);
+          std::ranges::sort(sentMsgs, [](const auto& a, const auto& b) {
+            return a.getRatchetIndex() < b.getRatchetIndex();
+          });
+          const int sc = static_cast<int>(sentMsgs.size());
+          if (sc > 0 && sc % 5 == 0) {
+            const int segIdx = sc / 5;
+            const std::string convId = "direct-" +
+                std::to_string(std::min(myId, contactId)) + "-" +
+                std::to_string(std::max(myId, contactId));
+            std::vector<MessageEnvelope> envs;
+            for (int i = sc - 5; i < sc; ++i) {
+              const auto& m = sentMsgs[static_cast<std::size_t>(i)];
+              MessageEnvelope env;
+              env.conversationId   = convId;
+              env.messageId        = std::to_string(m.getId());
+              env.senderId         = std::to_string(myId);
+              env.recipientId      = std::to_string(contactId);
+              env.ciphertext       = m.getCiphertext();
+              env.ratchetHeaderEnc = m.getRatchetHeaderEnc();
+              envs.push_back(std::move(env));
+            }
+            try {
+              auto digest = BlockchainManager::buildSegmentDigest(
+                  envs, convId, segIdx, base64Encode(ikPub));
+              BlockchainManager::writeSegmentFile(envs, digest);
+              state.chainVerifyStatus =
+                  "Block " + std::to_string(segIdx) +
+                  " auto-saved: " + digest.segmentId + ".json" +
+                  "  hash: " + digest.segmentHash.substr(0, 14) + "..." +
+                  "  -> open recording page & paste to sign";
+            } catch (const std::exception& ex) {
+              appendLog("[auto-export] " + std::string(ex.what()) + "\n");
+            }
+          }
         } else if (isGroup && groupId >= 0) {
           sendGroupMessage(api, state.groupSenderKeys, state.groupRatchets,
                            *state.messageStore, token, groupId, myId, text);
@@ -1072,8 +1121,16 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     scr.PostEvent(Event::Custom);
   };
 
+  // Flag set by the left-panel CatchEvent below so on_change only fires on
+  // deliberate mouse clicks, not on FTXUI's keyboard-navigation clamping.
+  bool menuMouseEvent = false;
   MenuOption menuOpt;
-  menuOpt.on_change = selectItem;
+  menuOpt.on_change = [&menuMouseEvent, selectItem] {
+    if (menuMouseEvent) {
+      menuMouseEvent = false;
+      selectItem();
+    }
+  };
   menuOpt.on_enter  = selectItem;
   auto leftMenu = Menu(state.allLabels.get(), &state.menuSelected, menuOpt);
 
@@ -1248,11 +1305,17 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       const auto convId = currentConvId();
       if (convId.empty()) { state.chainVerifyStatus = "No conversation selected."; return; }
 
-      // Find the next unexported segment using the ratchet counter.
-      // Segment N covers messages where ratchetIndex ∈ [N*5, N*5+4].
-      const int exported = state.segmentExported.count(convId)
-          ? state.segmentExported.at(convId) : 0;
-      const int segN = exported; // 0-based segment number to export next
+      // Segment to export: use manual block# input (1-based) if provided, else next unexported.
+      int segN;
+      if (!state.exportSegNumInput.empty()) {
+        try { segN = std::stoi(state.exportSegNumInput) - 1; }
+        catch (...) { state.chainVerifyStatus = "Invalid block number."; return; }
+        if (segN < 0) { state.chainVerifyStatus = "Block number must be >= 1."; return; }
+      } else {
+        const int exported = state.segmentExported.count(convId)
+            ? state.segmentExported.at(convId) : 0;
+        segN = exported;
+      }
       const int idxLo = segN * 5;
       const int idxHi = idxLo + 4;
 
@@ -1312,38 +1375,66 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto btnVerifyMsg = Button(" Verify Integrity ", [&] {
     try {
       if (!state.localUser || !state.messageStore) return;
-      if (state.viewingGroup) { state.chainVerifyStatus = "Verify not yet supported for groups."; return; }
-      if (state.selectedContactId < 0) { state.chainVerifyStatus = "Select a message first."; return; }
+      if (state.viewingGroup) { state.chainVerifyStatus = "Verify not supported for groups yet."; return; }
+      if (state.selectedMsgId < 0 || state.selectedContactId < 0) {
+        state.chainVerifyStatus = "Select a message first."; return;
+      }
 
       const auto convId = currentConvId();
-      // Find which segment the selected message belongs to via its ratchet index.
-      int segIdx = 1;
-      if (state.selectedMsgId >= 0) {
-        const auto msgs = state.messageStore->getByUser(state.selectedContactId);
-        for (const auto &m : msgs) {
-          if (m.getId() == state.selectedMsgId) {
-            segIdx = static_cast<int>(m.getRatchetIndex()) / 5 + 1;
-            break;
-          }
-        }
+      const auto msgs   = state.messageStore->getByUser(state.selectedContactId);
+
+      // Find the selected message.
+      const Message *target = nullptr;
+      for (const auto &m : msgs) {
+        if (m.getId() == state.selectedMsgId) { target = &m; break; }
       }
+      if (!target) { state.chainVerifyStatus = "Message not found."; return; }
+
+      // Stage 1: always compute the canonical envelope hash (local integrity).
+      const bool sent = target->getDirection() == BaseMessage::Direction::Sent;
+      MessageEnvelope env;
+      env.conversationId   = convId;
+      env.messageId        = std::to_string(target->getId());
+      env.senderId         = sent ? std::to_string(state.localUser->getId())
+                                  : std::to_string(target->getUserId());
+      env.recipientId      = sent ? std::to_string(target->getUserId())
+                                  : std::to_string(state.localUser->getId());
+      env.ciphertext       = target->getCiphertext();
+      env.ratchetHeaderEnc = target->getRatchetHeaderEnc();
+
+      const std::string envHash = BlockchainManager::toHex0x(BlockchainManager::leafHash(env));
+      const int segIdx = static_cast<int>(target->getRatchetIndex()) / 5 + 1;
+      state.chainVerifyStatus = "Msg hash: " + envHash.substr(0, 18) + "…  seg " +
+          std::to_string(segIdx);
+
+      // Stage 2: if a proof file exists, verify against it.
       const std::string proofFile = convId + "-seg-" + std::to_string(segIdx) + "-proofs.json";
       std::ifstream f(proofFile);
-      if (!f) { state.chainVerifyStatus = "No proof file found (" + proofFile + "). Export and record first."; return; }
+      if (!f) {
+        state.chainVerifyStatus += "  [no proof file yet — export & record seg " +
+            std::to_string(segIdx) + " first]";
+        return;
+      }
 
-      nlohmann::json packages = nlohmann::json::parse(f, nullptr, false);
+      auto packages = nlohmann::json::parse(f, nullptr, false);
       if (packages.is_discarded() || !packages.is_array() || packages.empty()) {
-        state.chainVerifyStatus = "Invalid proof file."; return;
+        state.chainVerifyStatus += "  [invalid proof file]"; return;
       }
 
-      // Verify each package in the file.
-      int ok = 0, fail = 0;
+      // Find the package for this specific message by matching envelope_hash.
       for (const auto &pkg : packages) {
-        const auto res = BlockchainManager::verifyLocalHashes(pkg);
-        res == "OK" ? ++ok : ++fail;
+        const std::string ph = pkg.value("proof", nlohmann::json{}).value("envelope_hash", "");
+        if (!ph.empty() &&
+            ph.substr(0, 18) == envHash.substr(0, 18)) { // compare first 18 chars
+          const auto res = BlockchainManager::verifyLocalHashes(pkg);
+          state.chainVerifyStatus = res == "OK"
+              ? "✓ Local integrity OK  seg " + std::to_string(segIdx) +
+                "  hash: " + envHash.substr(0, 18) + "…"
+              : "✗ FAIL: " + res;
+          return;
+        }
       }
-      state.chainVerifyStatus = "Local verify: " + std::to_string(ok) + " OK, " +
-          std::to_string(fail) + " FAIL (paste proof JSON in Blockchain overlay for on-chain check)";
+      state.chainVerifyStatus += "  [proof file exists but no entry for this message]";
     } catch (const std::exception &e) {
       state.chainVerifyStatus = std::string("Verify error: ") + e.what();
     }
@@ -1358,10 +1449,10 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       Container::Vertical({msgMenu, composeInput, btnSend, btnDelete,
                            addMemberMaybe, btnAddMemberMaybe,
                            btnRemoveMemberMaybe,
-                           btnExportSegment, btnVerifyMsg}),
+                           exportSegInput, btnExportSegment, btnVerifyMsg}),
       [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels,
        addMemberInput, btnAddMember, btnRemoveMember,
-       btnExportSegment, btnVerifyMsg, currentConvId] {
+       exportSegInput, btnExportSegment, btnVerifyMsg, currentConvId] {
         const auto _t0 = std::chrono::steady_clock::now();
         auto _log = [&](const char *tag) {
           const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1462,9 +1553,16 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         // Show blockchain export/verify controls for direct conversations.
         if (inChat && !state.viewingGroup && state.localUser && state.messageStore) {
           const auto convId = currentConvId();
-          const int exported = state.segmentExported.count(convId)
-              ? state.segmentExported.at(convId) : 0;
-          const int segN   = exported;
+          int segN;
+          if (!state.exportSegNumInput.empty()) {
+            try { segN = std::stoi(state.exportSegNumInput) - 1; }
+            catch (...) { segN = 0; }
+            if (segN < 0) segN = 0;
+          } else {
+            const int exported = state.segmentExported.count(convId)
+                ? state.segmentExported.at(convId) : 0;
+            segN = exported;
+          }
           const int idxLo  = segN * 5, idxHi = idxLo + 4;
           const auto msgs  = state.messageStore->getByUser(state.selectedContactId);
           int present = 0;
@@ -1476,16 +1574,21 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 
           rows.emplace_back(separator());
           rows.emplace_back(hbox({
-              text(segReady
-                  ? (" Segment " + std::to_string(segN + 1) +
-                     " ready (indices " + std::to_string(idxLo) + "–" +
-                     std::to_string(idxHi) + ") ")
-                  : (" Segment " + std::to_string(segN + 1) + ": " +
-                     std::to_string(present) + "/5 messages ")) | dim | flex,
-              segReady ? btnExportSegment->Render() : text(""),
+              text(" Block#:") | dim,
+              exportSegInput->Render() |
+                  size(WIDTH, EQUAL, 6) | size(HEIGHT, EQUAL, INPUT_LINE_HEIGHT),
               text("  "),
-              btnVerifyMsg->Render()
+              (segReady || !state.exportSegNumInput.empty())
+                  ? btnExportSegment->Render() : text(""),
+              text("  "),
+              btnVerifyMsg->Render(),
           }));
+          rows.emplace_back(
+              text(segReady
+                  ? (" Block " + std::to_string(segN + 1) +
+                     " ready (" + std::to_string(present) + "/5) ")
+                  : (" Block " + std::to_string(segN + 1) + ": " +
+                     std::to_string(present) + "/5 messages ")) | dim);
           if (!state.chainVerifyStatus.empty())
             rows.emplace_back(text(" " + state.chainVerifyStatus) | color(Color::Cyan));
         }
@@ -1493,7 +1596,13 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         return vbox(std::move(rows)) | border;
       });
 
-  auto split = ResizableSplitLeft(leftPanel, rightPanel, &state.splitPos);
+  auto split = ResizableSplitLeft(
+      CatchEvent(leftPanel, [&menuMouseEvent](Event e) {
+        if (e.is_mouse() && e.mouse().button == Mouse::Left)
+          menuMouseEvent = true;
+        return false;
+      }),
+      rightPanel, &state.splitPos);
 
   auto btnCloseOverlay = Button(" Close ", [&] {
     state.showIdentityOverlay = false;

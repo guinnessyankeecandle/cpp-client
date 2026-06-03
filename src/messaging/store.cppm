@@ -22,6 +22,7 @@ struct DirectRow {
   int direction{};
   int64_t timestampMs{};
   std::vector<char> plaintextEnc;
+  int ratchetIndex{};
 };
 
 struct GroupRow {
@@ -46,7 +47,8 @@ static auto makeStorage(const std::string &path) {
                  make_column("header_enc", &DirectRow::headerEnc),
                  make_column("direction", &DirectRow::direction),
                  make_column("timestamp_ms", &DirectRow::timestampMs),
-                 make_column("plaintext_enc", &DirectRow::plaintextEnc)),
+                 make_column("plaintext_enc", &DirectRow::plaintextEnc),
+                 make_column("ratchet_index", &DirectRow::ratchetIndex)),
       make_index("idx_gm_group", &GroupRow::groupId, &GroupRow::timestampMs,
                  &GroupRow::id),
       make_table("group_messages",
@@ -183,7 +185,8 @@ private:
             m.getRatchetHeaderEnc(),
             m.getDirection() == BaseMessage::Direction::Sent ? 0 : 1,
             static_cast<int64_t>(m.getTimestampMs()),
-            encryptPlaintext(m.getPlaintext())};
+            encryptPlaintext(m.getPlaintext()),
+            static_cast<int>(m.getRatchetIndex())};
   }
 
   [[nodiscard]] Message fromRow(const DirectRow &r) const {
@@ -191,7 +194,8 @@ private:
                                       : BaseMessage::Direction::Received;
     return {r.id,     r.userId, r.ciphertext, r.headerEnc,
             dir,      static_cast<uint64_t>(r.timestampMs),
-            decryptPlaintext(r.plaintextEnc)};
+            decryptPlaintext(r.plaintextEnc),
+            static_cast<uint32_t>(r.ratchetIndex)};
   }
 
   [[nodiscard]] GroupRow toRow(const GroupMessage &m) const {
