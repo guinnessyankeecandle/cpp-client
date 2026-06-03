@@ -925,14 +925,24 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
             try {
               auto digest = BlockchainManager::buildSegmentDigest(
                   envs, convId, segIdx, base64Encode(ikPub));
-              // keccak256(c1_bytes || c2_bytes || ... || c5_bytes)
-              std::vector<uint8_t> ctConcat;
-              for (const auto& env : envs) {
-                auto raw = base64Decode(env.ciphertext);
-                ctConcat.insert(ctConcat.end(), raw.begin(), raw.end());
+              // Canonical bundle hash — must match the verification page exactly.
+              // keccak256(utf8(JSON.stringify({"messages":[{"ciphertext":"...","index":N},...],
+              //                               "sender_public_key":"..."})))
+              // nlohmann::json sorts keys alphabetically, dump() is compact with no spaces.
+              nlohmann::json bundle;
+              nlohmann::json bundleMsgs = nlohmann::json::array();
+              for (int bi = 0; bi < static_cast<int>(envs.size()); ++bi) {
+                nlohmann::json bm;
+                bm["ciphertext"] = envs[static_cast<std::size_t>(bi)].ciphertext;
+                bm["index"] = bi + 1;
+                bundleMsgs.push_back(bm);
               }
+              bundle["messages"] = bundleMsgs;
+              bundle["sender_public_key"] = base64Encode(ikPub);
+              const std::string bundleStr = bundle.dump();
               const auto onChainHash = BlockchainManager::toHex0x(
-                  BlockchainManager::keccak256(ctConcat));
+                  BlockchainManager::keccak256(
+                      std::vector<uint8_t>(bundleStr.begin(), bundleStr.end())));
               const auto segFile = BlockchainManager::writeSegmentFile(envs, digest);
               state.chainVerifyStatus =
                   "Block " + std::to_string(segIdx) +

@@ -12,6 +12,7 @@
 #include <openssl/ecdsa.h>
 #include <openssl/obj_mac.h>
 #include <openssl/bn.h>
+#include <ctime>
 
 // ── Keccak-256 ────────────────────────────────────────────────────────────────
 //
@@ -626,22 +627,7 @@ std::string BlockchainManager::recordOnChain(
         const auto gpHex = ethRpc(rpcUrl, gpReq).get<std::string>();
         const uint64_t gasPrice = std::stoull(gpHex.substr(2), nullptr, 16) * 12 / 10;
 
-        // calldata: logAccess(bytes32) selector + hash
-        auto sel = keccak256(std::string("logAccess(bytes32)"));
-        std::vector<uint8_t> calldata(sel.begin(), sel.begin() + 4);
-        calldata.insert(calldata.end(), hashBytes.begin(), hashBytes.end());
-
-        constexpr uint64_t GAS_LIMIT = 80000;
-
-        // EIP-155 unsigned tx: [nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0]
-        auto rlpUnsigned = rlpL({
-            rlpU(nonce), rlpU(gasPrice), rlpU(GAS_LIMIT),
-            rlpB(toAddr), rlpU(0), rlpB(calldata),
-            rlpU(static_cast<uint64_t>(chainId)), rlpU(0), rlpU(0)
-        });
-        auto txHash = keccak256(rlpUnsigned);
-
-        // Sign with secp256k1
+        // Build EC key — used for both the message signature and the tx signature.
         BN_CTX* ctx = BN_CTX_new();
         EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
         EC_KEY* key = EC_KEY_new();
@@ -652,6 +638,75 @@ std::string BlockchainManager::recordOnChain(
         EC_POINT_mul(grp, pubPt, privBn, nullptr, nullptr, ctx);
         EC_KEY_set_public_key(key, pubPt);
 
+        // Sign the segment hash with the private key for the `bytes signature` parameter.
+        // Format: r (32) || s (32) || v (1), v = recId + 27 (message-signing convention).
+        std::vector<uint8_t> msgSig(65);
+        {
+            ECDSA_SIG* ms = ECDSA_do_sign(hashBytes.data(), 32, key);
+            if (!ms) throw std::runtime_error("Message sign failed");
+            const BIGNUM* mr = nullptr; const BIGNUM* mss = nullptr;
+            ECDSA_SIG_get0(ms, &mr, &mss);
+            std::vector<uint8_t> mr32(32), ms32(32);
+            BN_bn2binpad(mr, mr32.data(), 32);
+            BN_bn2binpad(mss, ms32.data(), 32);
+            // Low-s normalisation
+            {
+                const BIGNUM* nord = EC_GROUP_get0_order(grp);
+                BIGNUM* hn = BN_new(); BN_rshift1(hn, nord);
+                if (BN_cmp(mss, hn) > 0) {
+                    BIGNUM* ns = BN_new(); BN_sub(ns, nord, mss);
+                    BN_bn2binpad(ns, ms32.data(), 32); BN_free(ns);
+                }
+                BN_free(hn);
+            }
+            int mrid = -1;
+            for (int rid = 0; rid < 2; ++rid) {
+                auto rp = ecRecover(hashBytes, mr32, ms32, rid);
+                auto rh = keccak256(rp);
+                if (std::equal(rh.begin() + 12, rh.end(), senderBytes.begin()))
+                { mrid = rid; break; }
+            }
+            if (mrid < 0) throw std::runtime_error("Message recId failed");
+            ECDSA_SIG_free(ms);
+            std::copy(mr32.begin(), mr32.end(), msgSig.begin());
+            std::copy(ms32.begin(), ms32.end(), msgSig.begin() + 32);
+            msgSig[64] = static_cast<uint8_t>(mrid + 27);
+        }
+
+        // calldata: recordDigest(bytes32 hash, bytes signature, uint64 timestamp)
+        // ABI encoding: (bytes32 static) (bytes dynamic offset=96) (uint64 static)
+        //               then tail: length(65) + msgSig padded to 32-byte boundary
+        const uint64_t ts = static_cast<uint64_t>(std::time(nullptr));
+        auto sel = keccak256(std::string("recordDigest(bytes32,bytes,uint64)"));
+        std::vector<uint8_t> calldata(sel.begin(), sel.begin() + 4);
+        // Head slot 0: bytes32 hash
+        calldata.insert(calldata.end(), hashBytes.begin(), hashBytes.end());
+        // Head slot 1: offset to bytes data = 3*32 = 96
+        std::vector<uint8_t> off(32, 0); off[31] = 96;
+        calldata.insert(calldata.end(), off.begin(), off.end());
+        // Head slot 2: uint64 timestamp left-padded to 32 bytes
+        std::vector<uint8_t> tsSlot(32, 0);
+        for (int i = 0; i < 8; ++i)
+            tsSlot[31 - i] = static_cast<uint8_t>((ts >> (i * 8)) & 0xFF);
+        calldata.insert(calldata.end(), tsSlot.begin(), tsSlot.end());
+        // Tail: length of bytes (65)
+        std::vector<uint8_t> sigLen(32, 0); sigLen[31] = 65;
+        calldata.insert(calldata.end(), sigLen.begin(), sigLen.end());
+        // Tail: signature bytes + zero-padding to next 32-byte boundary (65 + 31 = 96)
+        calldata.insert(calldata.end(), msgSig.begin(), msgSig.end());
+        calldata.insert(calldata.end(), 31, 0x00);
+
+        constexpr uint64_t GAS_LIMIT = 120000; // slightly more for the larger calldata
+
+        // EIP-155 unsigned tx: [nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0]
+        auto rlpUnsigned = rlpL({
+            rlpU(nonce), rlpU(gasPrice), rlpU(GAS_LIMIT),
+            rlpB(toAddr), rlpU(0), rlpB(calldata),
+            rlpU(static_cast<uint64_t>(chainId)), rlpU(0), rlpU(0)
+        });
+        auto txHash = keccak256(rlpUnsigned);
+
+        // Sign the transaction
         ECDSA_SIG* sig = ECDSA_do_sign(txHash.data(), 32, key);
         if (!sig) throw std::runtime_error("ECDSA_do_sign failed");
 
@@ -661,8 +716,7 @@ std::string BlockchainManager::recordOnChain(
         BN_bn2binpad(sigR, rBytes.data(), 32);
         BN_bn2binpad(sigS, sBytes.data(), 32);
 
-        // EIP-2: low-s normalisation — OpenSSL does not enforce this automatically.
-        // If s > n/2, negate it: s = n - s. The recovery ID is recalculated below.
+        // EIP-2: low-s normalisation
         {
             const BIGNUM* n_ord = EC_GROUP_get0_order(grp);
             BIGNUM* half_n = BN_new();
@@ -676,7 +730,7 @@ std::string BlockchainManager::recordOnChain(
             BN_free(half_n);
         }
 
-        // Determine recovery ID by checking which one reconstructs our address
+        // Determine recovery ID
         int recId = -1;
         for (int rid = 0; rid < 2; ++rid) {
             auto recPub = ecRecover(txHash, rBytes, sBytes, rid);
