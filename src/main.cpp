@@ -882,12 +882,20 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     std::thread([&state, &api, &scr, isGroup, contactId, groupId,
                  text, token, myId, ikX, ikPub,
                  allContacts = std::move(allContacts)]() mutable {
+      // Data computed inside the mutex and used for on-chain recording outside it.
+      struct PendingRecord {
+        std::string onChainHash, segFile, ethKey, ethContract, ethRpc;
+        int segIdx{0};
+      };
+      std::optional<PendingRecord> pending;
+
       try {
         std::lock_guard<std::mutex> msgLock(state.messageMutex);
         if (!isGroup && contactId >= 0) {
           sendDirectMessage(api, state.ratchets, *state.messageStore,
                             token, contactId, text, ikX, allContacts);
-          // Auto-export a segment file every time 5 sent messages accumulate.
+          // Auto-export every 5th sent message — compute hash and write file
+          // inside the mutex, then record on-chain AFTER releasing it.
           const auto allMsgs = state.messageStore->getByUser(contactId);
           std::vector<Message> sentMsgs;
           for (const auto& m : allMsgs)
@@ -917,29 +925,26 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
             try {
               auto digest = BlockchainManager::buildSegmentDigest(
                   envs, convId, segIdx, base64Encode(ikPub));
-              BlockchainManager::writeSegmentFile(envs, digest);
+              // keccak256(c1_bytes || c2_bytes || ... || c5_bytes)
+              std::vector<uint8_t> ctConcat;
+              for (const auto& env : envs) {
+                auto raw = base64Decode(env.ciphertext);
+                ctConcat.insert(ctConcat.end(), raw.begin(), raw.end());
+              }
+              const auto onChainHash = BlockchainManager::toHex0x(
+                  BlockchainManager::keccak256(ctConcat));
+              const auto segFile = BlockchainManager::writeSegmentFile(envs, digest);
               state.chainVerifyStatus =
                   "Block " + std::to_string(segIdx) +
-                  " saved: " + digest.segmentId + ".json" +
-                  "  hash: " + digest.segmentHash.substr(0, 14) + "...";
-              // Submit hash on-chain if Ethereum config is available
+                  " saved: " + segFile +
+                  "  hash: " + onChainHash.substr(0, 16) + "...";
               if (!state.ethPrivateKey.empty() && !state.ethContractAddr.empty()) {
-                state.chainVerifyStatus += "  submitting...";
-                const auto txHash = BlockchainManager::recordOnChain(
-                    digest.segmentHash, state.ethContractAddr,
-                    state.ethPrivateKey, state.ethRpcUrl);
-                if (txHash.starts_with("FAIL")) {
-                  state.chainVerifyStatus += "  " + txHash;
-                } else {
-                  state.chainVerifyStatus =
-                      "Block " + std::to_string(segIdx) +
-                      " recorded on Sepolia  tx: " + txHash.substr(0, 18) + "..." +
-                      "  hash: " + digest.segmentHash.substr(0, 14) + "...";
-                  appendLog("[chain] tx=" + txHash + "\n");
-                }
+                state.chainVerifyStatus += "  submitting to Sepolia...";
+                pending = PendingRecord{onChainHash, segFile,
+                    state.ethPrivateKey, state.ethContractAddr,
+                    state.ethRpcUrl, segIdx};
               } else {
-                state.chainVerifyStatus +=
-                    "  (set eth_config.json to auto-record on chain)";
+                state.chainVerifyStatus += "  (add eth_config.json to record on chain)";
               }
             } catch (const std::exception& ex) {
               appendLog("[auto-export] " + std::string(ex.what()) + "\n");
@@ -955,6 +960,41 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         state.statusMsg = "Send error: " + std::string(e.what());
         appendLog("[send] error: " + std::string(e.what()) + "\n");
       }
+
+      // RPC calls happen here — outside the mutex so the poller is never blocked.
+      if (pending) {
+        try {
+          const auto txHash = BlockchainManager::recordOnChain(
+              pending->onChainHash, pending->ethContract,
+              pending->ethKey, pending->ethRpc);
+          if (txHash.starts_with("FAIL")) {
+            state.chainVerifyStatus += "  " + txHash;
+          } else {
+            std::ifstream fin(pending->segFile);
+            if (fin) {
+              auto j = nlohmann::json::parse(fin, nullptr, false);
+              fin.close();
+              if (!j.is_discarded()) {
+                j["segment_hash"]     = pending->onChainHash;
+                j["contract_address"] = pending->ethContract;
+                j["chain_id"]         = 11155111;
+                j["transaction_hash"] = txHash;
+                std::ofstream fout(pending->segFile);
+                if (fout) fout << j.dump(2);
+              }
+            }
+            state.chainVerifyStatus =
+                "Block " + std::to_string(pending->segIdx) +
+                " recorded on Sepolia  tx: " + txHash.substr(0, 18) + "..." +
+                "  hash: " + pending->onChainHash.substr(0, 16) + "...";
+            appendLog("[chain] tx=" + txHash + "\n");
+          }
+        } catch (const std::exception& ex) {
+          state.chainVerifyStatus += "  FAIL: " + std::string(ex.what());
+          appendLog("[chain] " + std::string(ex.what()) + "\n");
+        }
+      }
+
       state.msgsDirty = true;
       scr.PostEvent(Event::Custom);
     }).detach();
@@ -1847,6 +1887,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 int main() {
+  // Redirect stderr to the log file so crash output never bleeds into the TUI.
+  freopen("securemsg.log", "a", stderr);
   auto scr = ScreenInteractive::Fullscreen();
   const ApiClient api("https://BobbyTables.theburkenator.com");
   AppState state;
