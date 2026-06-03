@@ -224,21 +224,6 @@ TEST_CASE("SkdmEpochTracker: unknown group always accepts", "[send_receive][grou
   REQUIRE(tracker.resolve(99, 5) >= 0);
 }
 
-TEST_CASE("SkdmEpochTracker: weCausedEpoch correctly identifies self-caused bumps",
-          "[send_receive][group]") {
-  SkdmEpochTracker tracker;
-  // Post at epoch 3 → server bumps to 4
-  tracker.recordPosted(1, 3);
-
-  // Epoch 4 is the one WE caused — should NOT trigger a foreign rekey
-  REQUIRE(tracker.weCausedEpoch(1, 4));
-  // Epoch 5 is a subsequent change — someone else did something
-  REQUIRE_FALSE(tracker.weCausedEpoch(1, 5));
-  // Epoch 3 (same as what we posted at) is not what we caused (we caused 4)
-  REQUIRE_FALSE(tracker.weCausedEpoch(1, 3));
-  // Unknown group: never caused by us
-  REQUIRE_FALSE(tracker.weCausedEpoch(99, 4));
-}
 
 // ── Group send/receive end-to-end (no network) ───────────────────────────────
 // Simulates the UI flow: user picks a group, types a message, presses Send.

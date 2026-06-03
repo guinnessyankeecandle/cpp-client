@@ -507,49 +507,33 @@ struct Poller {
                   pollGroupIds.push_back(g.getId());
               }
 
-              // ── Direct messages: fetch then process ────────────────────
-              appendLog("[poller] fetching direct messages (no lock)\n");
-              const auto directMsgsJson = api.listMessages(lu.getAccessToken());
+              // ── Direct messages ────────────────────────────────────────
+              appendLog("[poller] receiving direct messages\n");
               {
                 std::lock_guard<std::mutex> msgLock(state.messageMutex);
                 const auto &kb = lu.getKeyBundle();
-                const auto dmAckIds = processDirectMessages(
-                    directMsgsJson, state.ratchets, *state.messageStore,
-                    kb.ikX, kb.spk, kb.opks, kb.pq,
+                receiveDirectMessages(api, state.ratchets, *state.messageStore,
+                    lu.getAccessToken(), kb.ikX, kb.spk, kb.opks, kb.pq,
                     *state.localUser, state.loginPassword);
-                for (const int32_t id : dmAckIds)
-                  api.acknowledgeReceipt(lu.getAccessToken(), id);
               }
               state.msgsDirty = true;
               scr.PostEvent(Event::Custom);
 
-              // ── Groups: fetch-then-process ONE AT A TIME ───────────────
-              // Posting an event after each group lets the render thread
-              // update the display between groups rather than waiting for
-              // all N groups to complete (which could take 30+ seconds).
+              // ── Groups ─────────────────────────────────────────────────
               const auto &kb = lu.getKeyBundle();
               for (const int32_t gid : pollGroupIds) {
-                appendLog("[poller] fetching group " + std::to_string(gid) + " (no lock)\n");
-                const auto skdmJson = api.fetchSkdm(lu.getAccessToken(), gid);
-                const auto msgJson  = api.listGroupMessages(lu.getAccessToken(), gid);
-
-                std::vector<std::pair<int32_t,int32_t>> gmAckIds;
+                appendLog("[poller] processing group " + std::to_string(gid) + "\n");
                 {
                   std::lock_guard<std::mutex> msgLock(state.messageMutex);
-                  applySkdms(skdmJson, gid,
-                             kb.ikX, kb.spk, kb.opks, kb.pq,
-                             state.groupRatchets, state.skdmTracker);
-                  gmAckIds = processGroupMessages(msgJson, state.groupRatchets,
-                                                  *state.messageStore,
-                                                  lu.getId(), gid);
+                  fetchAndApplySkdms(api, lu.getAccessToken(), gid,
+                      kb.ikX, kb.spk, kb.opks, kb.pq,
+                      state.groupRatchets, state.skdmTracker);
+                  receiveGroupMessages(api, state.groupRatchets,
+                      *state.messageStore, lu.getAccessToken(),
+                      gid, lu.getId());
                 }
-                for (const auto &[g, id] : gmAckIds)
-                  api.acknowledgeGroupReceipt(lu.getAccessToken(), g, id);
-
-                if (!gmAckIds.empty()) {
-                  state.msgsDirty = true;
-                  scr.PostEvent(Event::Custom);
-                }
+                state.msgsDirty = true;
+                scr.PostEvent(Event::Custom);
               }
 
               for (const int32_t senderId : state.messageStore->getDirectSenderIds()) {
@@ -603,8 +587,7 @@ struct Poller {
                             " members=" + std::to_string(members.size()) + "\n");
 
                   if (state.knownGroupEpochs.contains(gid) &&
-                      state.knownGroupEpochs.at(gid) != epoch &&
-                      !state.skdmTracker.weCausedEpoch(gid, epoch)) {
+                      state.knownGroupEpochs.at(gid) != epoch) {
                     state.statusMsg =
                         "⚠ Group " + g.at("name").get<std::string>() +
                         " membership changed — re-keying";
