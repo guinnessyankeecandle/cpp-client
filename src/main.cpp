@@ -970,19 +970,6 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           if (txHash.starts_with("FAIL")) {
             state.chainVerifyStatus += "  " + txHash;
           } else {
-            std::ifstream fin(pending->segFile);
-            if (fin) {
-              auto j = nlohmann::json::parse(fin, nullptr, false);
-              fin.close();
-              if (!j.is_discarded()) {
-                j["segment_hash"]     = pending->onChainHash;
-                j["contract_address"] = pending->ethContract;
-                j["chain_id"]         = 11155111;
-                j["transaction_hash"] = txHash;
-                std::ofstream fout(pending->segFile);
-                if (fout) fout << j.dump(2);
-              }
-            }
             state.chainVerifyStatus =
                 "Block " + std::to_string(pending->segIdx) +
                 " recorded on Sepolia  tx: " + txHash.substr(0, 18) + "..." +
