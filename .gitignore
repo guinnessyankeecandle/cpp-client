@@ -6,6 +6,20 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 _deps/
+
+# Conan generated
+CMakeUserPresets.json
+conan_toolchain.cmake
+conanbuild.sh
+conanrun.sh
+conanbuildenv-*.sh
+conanrunenv-*.sh
+*-Target-*.cmake
+*-data.cmake
+*Config.cmake
+*ConfigVersion.cmake
+*Targets.cmake
+cmakedeps_macros.cmake
 securemsg.log
 messages_*.db
 
