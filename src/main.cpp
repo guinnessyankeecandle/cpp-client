@@ -117,7 +117,7 @@ static void appendLog(const std::string &msg) {
 
 // Input that strips newlines on every event.
 static Component noNewlineInput(std::string *str, const std::string &placeholder,
-                                InputOption opts = {}) {
+                                const InputOption &opts = {}) {
   auto inp = Input(str, placeholder, opts);
   inp |= CatchEvent([str](const Event &) { std::erase(*str, '\n'); return false; });
   return inp;
@@ -432,7 +432,7 @@ Component makeLoginScreen(AppState &state, ScreenInteractive &scr,
 
         state.contactCache = contactCacheLoad("known_identities.json");
         {
-          std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
+          const std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
           for (const auto &c : state.contactCache)
             state.usernameCache[c.getId()] = c.getUsername();
         }
@@ -487,7 +487,6 @@ struct Poller {
   Poller(AppState &state, ScreenInteractive &scr, const ApiClient &api)
       : m_thread([&] {
           static constexpr int SPK_ROTATE_INTERVAL = 2016; // ~7 days at 5s poll
-          int contactTick = 1; // fetch groups on first poll (5 s after login)
           int spkRotateTick = SPK_ROTATE_INTERVAL;
 
           std::unique_lock<std::mutex> lock(m_mutex);
@@ -544,16 +543,15 @@ struct Poller {
                   try {
                     const auto res  = api.lookupById(lu.getAccessToken(), senderId);
                     const auto name = res.at("username").get<std::string>();
-                    const auto ikRes = api.lookupByUsername(lu.getAccessToken(), name);
-                    const auto ikPub = base64Decode(
-                        ikRes.at("identity_pub").get<std::string>());
                     {
-                      std::lock_guard<std::mutex> lk(state.stateMutex);
-                      state.contacts.emplace_back(senderId, name, ikPub);
+                      const auto ikRes = api.lookupByUsername(lu.getAccessToken(), name);
+                      const std::lock_guard<std::mutex> lk(state.stateMutex);
+                      state.contacts.emplace_back(senderId, name,
+                          base64Decode(ikRes.at("identity_pub").get<std::string>()));
                       state.labelsDirty = true;
                     }
                     {
-                      std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
+                      const std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
                       state.usernameCache[senderId] = name;
                     }
                   } catch (...) {}
@@ -619,16 +617,15 @@ struct Poller {
                       try {
                         const auto r    = api.lookupById(lu.getAccessToken(), mid);
                         const auto name = r.at("username").get<std::string>();
-                        const auto ikRes =
-                            api.lookupByUsername(lu.getAccessToken(), name);
-                        const auto ikPub =
-                            base64Decode(ikRes.at("identity_pub").get<std::string>());
                         {
-                          std::lock_guard<std::mutex> lk(state.stateMutex);
-                          state.contactCache.emplace_back(mid, name, ikPub);
+                          const auto ikRes =
+                              api.lookupByUsername(lu.getAccessToken(), name);
+                          const std::lock_guard<std::mutex> lk(state.stateMutex);
+                          state.contactCache.emplace_back(mid, name,
+                              base64Decode(ikRes.at("identity_pub").get<std::string>()));
                         }
                         {
-                          std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
+                          const std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
                           state.usernameCache[mid] = name;
                         }
                         appendLog("[poller] cached " + name + " id=" +
@@ -765,7 +762,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto usernameById = [&](const int32_t id) -> std::string {
     if (state.localUser && id == state.localUser->getId())
       return state.localUser->getUsername();
-    std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
+    const std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
     const auto it = state.usernameCache.find(id);
     return it != state.usernameCache.end() ? it->second
                                            : "user:" + std::to_string(id);
@@ -790,7 +787,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           std::chrono::steady_clock::now() - _rb0).count();
       if (_rb1 > 50)
         appendLog("[rebuildMsgLabels] getByGroup took " + std::to_string(_rb1) + "ms\n");
-      for (const auto &m : groupMsgs) {
+      for (std::size_t i = 0; i < groupMsgs.size(); ++i) {
+        const auto &m = groupMsgs[i];
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
         const std::string senderName =
             mine ? state.localUser->getUsername() : usernameById(m.getUserId());
@@ -801,11 +799,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     } else if (!state.viewingGroup && state.selectedContactId >= 0) {
       const std::string myName = state.localUser->getUsername();
       const std::string theirName = usernameById(state.selectedContactId);
-      for (const auto &m :
-           state.messageStore->getByUser(state.selectedContactId)) {
+      const auto directMsgs = state.messageStore->getByUser(state.selectedContactId);
+      for (std::size_t i = 0; i < directMsgs.size(); ++i) {
+        const auto &m = directMsgs[i];
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
-        msgLabels->emplace_back(" " + (mine ? myName : theirName) + ": " +
-                             m.getPlaintext());
+        msgLabels->emplace_back(" " + std::to_string(m.getRatchetIndex()) + ". " +
+                                (mine ? myName : theirName) + ": " + m.getPlaintext());
         msgIds->emplace_back(m.getId());
         msgSent->emplace_back(mine);
       }
@@ -898,7 +897,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       try {
         if (sent)
           api.revokeMessage(token, msgId);
-        std::lock_guard<std::mutex> lk(state.messageMutex);
+        const std::lock_guard<std::mutex> lk(state.messageMutex);
         if (isGroup)
           state.messageStore->removeGroupMessage(groupId, msgId);
         else
@@ -960,7 +959,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         }();
         std::map<int32_t, std::string> freshSkdms;
         {
-          std::lock_guard<std::mutex> lk(state.messageMutex);
+          const std::lock_guard<std::mutex> lk(state.messageMutex);
           if (state.groupSenderKeys.contains(state.selectedGroupId)) {
             auto newKey = randomBytes(KEY_BYTES);
             for (const int32_t mid : members) {
@@ -988,7 +987,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   state.allLabels->clear();
 
   auto rebuildLabels = [allLabels = state.allLabels, &state] {
-    std::unique_lock<std::mutex> lk(state.stateMutex, std::try_to_lock);
+    const std::unique_lock lk(state.stateMutex, std::try_to_lock);
     if (!lk) {
       appendLog("[rebuildLabels] skipped: stateMutex held by poller\n");
       return;
@@ -1033,7 +1032,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
   auto selectItem = [&state, &scr] {
     std::vector<int32_t> cIds, gIds;
     {
-      std::lock_guard<std::mutex> lk(state.stateMutex);
+      const std::lock_guard<std::mutex> lk(state.stateMutex);
       std::ranges::transform(state.contacts, std::back_inserter(cIds),
                              [](const auto &c) { return c.getId(); });
       std::ranges::transform(state.groups, std::back_inserter(gIds),
@@ -1112,7 +1111,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         appendLog("[createGroup] API response: " + res.dump() + "\n");
         const int32_t gid = res.at("id").get<int32_t>();
         {
-          std::lock_guard<std::mutex> lk(state.messageMutex);
+          const std::lock_guard<std::mutex> lk(state.messageMutex);
           state.groupSenderKeys[gid] = senderKey;
         }
         OPENSSL_cleanse(senderKey.data(), senderKey.size());
@@ -1125,7 +1124,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     }).detach();
   });
 
-  auto btnNewGroup = Button(" + Group ", [&, rebuildLabels] {
+  auto btnNewGroup = Button(" + Group ", [&] {
     state.creatingGroup = !state.creatingGroup;
     if (!state.creatingGroup)
       state.selectedGroupMembers.clear();
@@ -1151,7 +1150,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
           state.statusMsg = "Cannot add yourself as a contact.";
         } else {
           {
-            std::lock_guard<std::mutex> lk(state.stateMutex);
+            const std::lock_guard<std::mutex> lk(state.stateMutex);
             if (std::ranges::none_of(state.contacts,
                                      [uid](const auto &c) { return c.getId() == uid; }))
               state.contacts.emplace_back(uid, username, ikPub);
@@ -1168,7 +1167,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
             }
           }
           {
-            std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
+            const std::lock_guard<std::mutex> lk(state.usernameCacheMutex);
             state.usernameCache[uid] = username;
           }
           rebuildLabels();
@@ -1250,8 +1249,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
                   " dirty=" + std::to_string(state.msgsDirty) +
                   " labels=" + std::to_string(state.msgLabels->size()) + "\n");
         if (state.msgsDirty) {
-          std::unique_lock<std::mutex> msgTry(state.messageMutex,
-                                              std::try_to_lock);
+          const std::unique_lock<std::mutex> msgTry(state.messageMutex,
+                                                    std::try_to_lock);
           _log("after-try-lock");
           if (msgTry) {
             appendLog("[render] got messageMutex, rebuilding\n");
@@ -1285,7 +1284,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         if (state.viewingGroup && state.selectedGroupId >= 0) {
           static std::vector<int32_t> memberSnapshot;
           static int32_t snapshotGroupId = -1;
-          std::unique_lock<std::mutex> stateTry(state.stateMutex,
+          const std::unique_lock stateTry(state.stateMutex,
                                                     std::try_to_lock);
           if (stateTry) {
             if (snapshotGroupId != state.selectedGroupId || state.msgsDirty) {
@@ -1311,7 +1310,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
               const std::string mname = (nameIt != state.contacts.end())
                   ? nameIt->getUsername()
                   : [&] {
-                      auto cit = std::ranges::find_if(state.contactCache,
+                      const auto cit = std::ranges::find_if(state.contactCache,
                           [mid](const auto &c) { return c.getId() == mid; });
                       return cit != state.contactCache.end()
                           ? cit->getUsername() : "user:" + std::to_string(mid);
@@ -1440,7 +1439,7 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       if (state.chainVerifyInput.empty()) {
         state.chainVerifyResult = "Paste a proof package JSON first."; return;
       }
-      auto pkg = nlohmann::json::parse(state.chainVerifyInput, nullptr, false);
+      const auto pkg = nlohmann::json::parse(state.chainVerifyInput, nullptr, false);
       if (pkg.is_discarded()) { state.chainVerifyResult = "Invalid JSON."; return; }
       const auto local = BlockchainManager::verifyLocalHashes(pkg);
       if (local != "OK") { state.chainVerifyResult = local; return; }

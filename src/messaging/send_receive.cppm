@@ -154,7 +154,7 @@ export SendResult sendDirectMessage(const ApiClient &api, RatchetMap &ratchets,
 
   store.add(Message{msgId, recipientId, base64Encode(msg.ciphertext),
                     base64Encode(packedHeader), BaseMessage::Direction::Sent,
-                    nowMs(), plaintext});
+                    nowMs(), plaintext, msg.totalSentCount});
   return {msgId};
 }
 
@@ -234,12 +234,12 @@ export void receiveDirectMessages(const ApiClient &api, RatchetMap &ratchets,
       RatchetMessage rmsg{
           std::move(encHeader),
           base64Decode(msg.at("ciphertext").get<std::string>())};
-      auto [plain, tsMs] = ratchet.decrypt(rmsg);
+      auto [plain, tsMs, ratchetIdx] = ratchet.decrypt(rmsg);
       store.add(Message{id, otherUserId,
                         msg.at("ciphertext").get<std::string>(),
                         msg.at("ratchet_header_enc").get<std::string>(),
                         BaseMessage::Direction::Received, tsMs,
-                        std::string(plain.begin(), plain.end())});
+                        std::string(plain.begin(), plain.end()), ratchetIdx});
       api.acknowledgeReceipt(accessToken, id);
     } catch (...) {
     }

@@ -34,17 +34,21 @@ export class Message : public BaseMessage {
 public:
   Message(const int32_t id, const int32_t otherUserId, std::string ciphertext,
           std::string ratchetHeaderEnc, const Direction dir,
-          const uint64_t timestampMs, std::string plaintext)
+          const uint64_t timestampMs, std::string plaintext,
+          const uint32_t ratchetIndex = 0)
       : BaseMessage(id, otherUserId, std::move(ciphertext), dir, timestampMs,
                     std::move(plaintext)),
-        m_ratchetHeaderEnc(std::move(ratchetHeaderEnc)) {}
+        m_ratchetHeaderEnc(std::move(ratchetHeaderEnc)),
+        m_ratchetIndex(ratchetIndex) {}
 
   [[nodiscard]] const std::string &getRatchetHeaderEnc() const {
     return m_ratchetHeaderEnc;
   }
+  [[nodiscard]] uint32_t getRatchetIndex() const { return m_ratchetIndex; }
 
 private:
   std::string m_ratchetHeaderEnc;
+  uint32_t m_ratchetIndex;
 };
 
 export class GroupMessage : public BaseMessage {
