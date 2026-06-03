@@ -807,19 +807,11 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
     msgIds->clear();
     msgSent->clear();
     if (!state.localUser || !state.messageStore) {
-      appendLog("[rebuild] skipped: localUser=" +
-                std::to_string(static_cast<bool>(state.localUser)) +
-                " store=" + std::to_string(static_cast<bool>(state.messageStore)) + "\n");
       return;
     }
 
     if (state.viewingGroup && state.selectedGroupId >= 0) {
-      const auto _rb0 = std::chrono::steady_clock::now();
       const auto groupMsgs = state.messageStore->getByGroup(state.selectedGroupId);
-      const auto _rb1 = std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now() - _rb0).count();
-      if (_rb1 > 50)
-        appendLog("[rebuildMsgLabels] getByGroup took " + std::to_string(_rb1) + "ms\n");
       for (std::size_t i = 0; i < groupMsgs.size(); ++i) {
         const auto &m = groupMsgs[i];
         const bool mine = m.getDirection() == BaseMessage::Direction::Sent;
@@ -842,12 +834,8 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
         msgSent->emplace_back(mine);
       }
     } else {
-      appendLog("[rebuild] no chat selected: contactId=" +
-                std::to_string(state.selectedContactId) +
-                " groupId=" + std::to_string(state.selectedGroupId) + "\n");
       return;
     }
-    appendLog("[rebuild] labels=" + std::to_string(msgLabels->size()) + "\n");
     if (state.msgIds->empty()) {
       state.msgSelected = 0;
       state.selectedMsgId = -1;
@@ -1530,33 +1518,12 @@ Component makeMainScreen(AppState &state, ScreenInteractive &scr,
       [&, msgMenu, composeInput, btnSend, btnDelete, rebuildMsgLabels,
        addMemberInput, btnAddMember, btnRemoveMember,
        exportSegInput, btnExportSegment, btnVerifyMsg, currentConvId] {
-        const auto _t0 = std::chrono::steady_clock::now();
-        auto _log = [&](const char *tag) {
-          const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now() - _t0).count();
-          appendLog("[render][" + std::string(tag) + "] " +
-                    std::to_string(ms) + "ms\n");
-        };
-        // Log every render so we can see if the event loop is alive even
-        // when msgsDirty is false (e.g. user keypresses between poll ticks).
-        appendLog("[render] frame viewingGroup=" +
-                  std::to_string(state.viewingGroup) +
-                  " groupId=" + std::to_string(state.selectedGroupId) +
-                  " dirty=" + std::to_string(state.msgsDirty) +
-                  " labels=" + std::to_string(state.msgLabels->size()) + "\n");
         if (state.msgsDirty) {
           const std::unique_lock<std::mutex> msgTry(state.messageMutex,
                                                     std::try_to_lock);
-          _log("after-try-lock");
           if (msgTry) {
-            appendLog("[render] got messageMutex, rebuilding\n");
             rebuildMsgLabels();
-            _log("after-rebuildMsgLabels");
             state.msgsDirty = false;
-            appendLog("[render] rebuild done, labels=" +
-                      std::to_string(state.msgLabels->size()) + "\n");
-          } else {
-            appendLog("[render] messageMutex busy, skipping rebuild\n");
           }
         }
         const bool inChat =
